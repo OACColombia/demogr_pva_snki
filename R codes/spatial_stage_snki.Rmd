@@ -1338,12 +1338,12 @@ I reduced some values to make quick computation. In addition, I saved the determ
 ```{r}
 library(tidyverse)
 
-lambda_metaP <- readRDS("data/df_lambda_meta.RDS") %>% 
+lambda_metaP <- readRDS(here::here("data/df_lambda_meta.RDS")) %>%  # the here::here() anchors the file paths to the main project root, no matter where the .Rmd file is sitting.
   mutate(take = factor(take, levels = c("0", "0.2", "0.5"),
                              labels = c("0%", "20%", "50%"))) |>
   filter(management == "status_quo")
 
-lambda_patchB <- readRDS("data/df_lambda_patch.RDS") %>% 
+lambda_patchB <- readRDS(here::here("data/df_lambda_patch.RDS")) %>% 
   mutate(take = factor(take, levels = c("0", "0.2", "0.5"),
                              labels = c("0%", "20%", "50%"))) |>
   filter(management == "status_quo")
@@ -1351,6 +1351,7 @@ lambda_patchB <- readRDS("data/df_lambda_patch.RDS") %>%
 mean_lambda_A <- lambda_metaP |>
   summarise(mean_lambda_A = mean(lambda_meta), 
             .groups = "drop")
+mean_lambda_A
 
 ggplot(lambda_metaP, aes(x = year + 2022, 
                          y = lambda_meta, 
@@ -1367,10 +1368,10 @@ ggplot(lambda_metaP, aes(x = year + 2022,
 mean_lambda_B <- lambda_patchB |>
   group_by(MU) |>
   summarise(mean_lambda_B = mean(lambda_patch))
-
+mean_lambda_B
 
 ggplot(lambda_patchB, aes(x = year + 2022, 
-                         y = lambda_meta, 
+                         y = lambda_patch, 
                          color = take)) +
   facet_grid(~MU) +
   geom_jitter(alpha = 0.2, width = 0.1) +
@@ -1380,7 +1381,7 @@ ggplot(lambda_patchB, aes(x = year + 2022,
        y = expression(lambda[bold(B)[h]]), 
        color = "Breeders\nremoved") +
   theme_bw() +
-  theme(strip.background = element_blank())
+  theme(strip.background = element_blank(), axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
 
 ```
 
@@ -1465,7 +1466,7 @@ $$
 
 ## Model demography without dispersal
 
-Let $\mathbf{B}_h$ be the $s \times s$ demographic projection matrix for patch $h$ (Lefkovitch matrix), the matrix model describing the population for this patch is $\mathbf{n}_h(t+1) = \mathbf{B}_h\mathbf{n}_h(t)$. Without dispersal, the metapopulation would be projected by a block diagonal matrix $\mathcal{B}$. Lets use the four potential stages in snail kites (1: young of the year $<1$ year, 2: young adult $1$ to $2$ years, 3: adult $>2$ but $≤12$, and 4: old adult $>12$) and the six "patches" (1: EVER, 2: OKEE, 3: EAST, 4: KRV, 5: SJM, and 6: PP):
+Let $\mathbf{B}_h$ be the $s \times s$ demographic projection matrix for patch $h$ (Lefkovitch matrix), the matrix model describing the population for this patch is $\mathbf{n}_h(t+1) = \mathbf{B}_h\mathbf{n}_h(t)$. Without dispersal, the metapopulation would be projected by a block diagonal matrix $\mathbb{B}$. Lets use four potential stages in snail kites (1: juvenile $<1$ year, 2: young adult $1$ to $2$ years, 3: adult $>2$ but $≤12$, and 4: old adult $>12$; slightly adjusted from: young of the year (G, G-A, G-C, G-D), juvenile, boy, adult, old) and the six "patches" (1: EVER, 2: OKEE, 3: EAST, 4: KRV, 5: SJM, and 6: PP):
 
 $$
 \begin{pmatrix} 
@@ -1526,8 +1527,21 @@ $$
   \end{bmatrix}
 \end{pmatrix}(t)
 $$
-
-where the elements within $\mathbf{B}_h$ represents different population parameters. Let's begin with the transitions subdiagonals $G_s$ of the Lefkovitch matrix, which can be parameterized as $G_s = \phi_s \gamma_s$, where $\phi_s$ is annual survivorship and $\gamma_s$ is the probability of advancing to the next stage given survival. Stage 1 and 2 are fixed in time, so an individual surviving a year in stage 1 **must** enter stage 2 and an individual surviving a year in stage 2 **must** enter state 3; transitions $G_1$ and $G_2$ in the Lefkovitch matrix is represented by the annual survival $\phi_1$ and $\phi_2$, respectability. In stage 3 (2-12 yr), an individual can survive and remain in stage 3, can survive and become >12 (stage 4), or can die. This transition is parameterized as $G_3 = \phi_3 \gamma_3$. Stage 4 is the terminal stage, so there is no "transition" ($G_4 = 0$). The conditions of our stage means that the diagonal of stage survival probability $Q_s$ (the probability to stay at stage $s$; $Q_s = \phi_s (1 - \gamma_s)$) is 0 for stages 1 and 2. In stage 3, this stage survival probability becomes $Q_3 = \phi_3 (1-\gamma_3)$ (the individual survive stage 3 and does not transition to stage 4). Because individuals in the terminal stage (4) do not transition to a next stage, the stage survival probability is the annual survival probability $Q_4 = \phi_4$. Finally, we have the fertility. Evidently, individuals within stage 1 ($<1$ year) do not have fertility, so $F_1 = 0$. The fertility of the different stages from 2 to 4 is represented by $F_2$, $F_3$, and $F_4$. 
+where 
+$$
+\mathbb{B} = \begin{pmatrix}
+      \mathbf{B}_1 = \begin{bmatrix} 
+      0 & F_2 & F_3 & F_4 \\
+      \phi_1 & 0 & 0 & 0 \\
+      0 & \phi_2 & \phi_3(1-\gamma_3) & 0 \\
+      0 & 0 & \phi_3 \gamma_3 & \phi_4
+      \end{bmatrix}_1 & 0 & \cdots & 0 \\
+      0 & \mathbf{B}_2 & \cdots & 0 \\
+      \vdots & \vdots & \ddots & \vdots \\ 
+      0 & 0 & \cdots & \mathbf{B}_H
+\end{pmatrix}
+$$
+and the elements within $\mathbf{B}_h$ represents different population parameters. Let's begin with the transitions subdiagonals $G_s$ of the Lefkovitch matrix, which can be parameterized as $G_s = \phi_s \gamma_s$, where $\phi_s$ is annual survivorship and $\gamma_s$ is the probability of advancing to the next stage given survival. Stage 1 and 2 are fixed in time, so an individual surviving a year in stage 1 **must** enter stage 2 and an individual surviving a year in stage 2 **must** enter state 3; transitions $G_1$ and $G_2$ in the Lefkovitch matrix is represented by the annual survival $\phi_1$ and $\phi_2$, respectability. In stage 3 (2-12 yr), an individual can survive and remain in stage 3, can survive and become >12 (stage 4), or can die. This transition is parameterized as $G_3 = \phi_3 \gamma_3$. Stage 4 is the terminal stage, so there is no "transition" ($G_4 = 0$). The conditions of our stage means that the diagonal of stage survival probability $Q_s$ (the probability to stay at stage $s$; $Q_s = \phi_s (1 - \gamma_s)$) is 0 for stages 1 and 2. In stage 3, this stage survival probability becomes $Q_3 = \phi_3 (1-\gamma_3)$ (the individual survive stage 3 and does not transition to stage 4). Because individuals in the terminal stage (4) do not transition to a next stage, the stage survival probability is the annual survival probability $Q_4 = \phi_4$. Finally, we have the fertility. Evidently, individuals within stage 1 ($<1$ year) do not have fertility, so $F_1 = 0$. The fertility of the different stages from 2 to 4 is represented by $F_2$, $F_3$, and $F_4$. 
 
 This model can be simplify to include only two stages: 1) juveniles without reproduction and 2) adults:
 $$
@@ -1544,7 +1558,7 @@ $$
 \end{pmatrix} (t + 1) = \begin{pmatrix}
       \mathbf{B}_1 = \begin{bmatrix} 
       0 & F_2  \\
-      \phi_1 & \phi_2 (1 - \gamma_2)
+      \phi_1 & \phi_2 (1 - \gamma)
       \end{bmatrix}_1 & 0 & \cdots & 0 \\
       0 & \mathbf{B}_2 & \cdots & 0 \\
       \vdots & \vdots & \ddots & \vdots \\ 
@@ -1563,11 +1577,38 @@ $$
 \end{pmatrix}(t)
 $$
 
-Annual survival $\phi_{s,h}$ (and detection probability $p_{s,h}$) can be estimated with a multistate Capture-Mark-Recapture model. Adding stage transitions to this model, we can estimate the probability of advancing to stage 2 given survival in stage 1 $\gamma_2$. Fertility can be estimated with the breeding probability or with an integrated population model. 
+And even further simplified with only two regions (e.g., north and south):
+
+$$
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{2,1}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{1,2} \\ n_{2,2} 
+  \end{bmatrix}
+\end{pmatrix} (t + 1) = \begin{pmatrix}
+      \mathbf{B}_1 = \begin{bmatrix} 
+      0 & F_2  \\
+      \phi_1 & \phi_2 (1 - \gamma)
+      \end{bmatrix}_1 & 0 \\
+      0 & \mathbf{B}_2 
+\end{pmatrix} \times
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{2,1}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{1,2} \\ n_{2,2}  
+  \end{bmatrix}
+\end{pmatrix}(t)
+$$
+
+Annual survival $\phi_{s,h}$ (and detection probability $p_{s,h}$) can be estimated with a multistate Capture-Mark-Recapture model. Adding stage transitions to this model, we can estimate the probability of advancing stages given survival in the previous stage $\gamma$ (growing). Fertility can be estimated with the breeding probability or with an integrated population model. 
 
 ## Model dispersal without demography
 
-Let $\mathbf{M}_s$ be the $h \times h$ dispersal matrix for stage $s$, so that $m_{ij}^{(s)}$ is the probability that an individual of stage $s$ moves from patch $j$ to patch $i$. Then dispersal would be described by a block diagonal matrix $\mathcal{M}$. Again, lets use the four potential stages in snail kites (1: young of the year $<1$ year, 2: young adult $1$ to $2$ years, 3: adult $>2$ but $≤12$, and 4: old adult $>12$) and the six "patches" (1: EVER, 2: OKEE, 3: EAST, 4: KRV, 5: SJM, and 6: PP):
+Let $\mathbf{M}_s$ be the $h \times h$ dispersal matrix for stage $s$, so that $m_{ij}^{(s)}$ is the probability that an individual of stage $s$ moves from patch $j$ to patch $i$. Then dispersal would be described by a block diagonal matrix $\mathbb{M}$. Again, lets use the four potential stages in snail kites (1: young of the year $<1$ year, 2: young adult $1$ to $2$ years, 3: adult $>2$ but $≤12$, and 4: old adult $>12$) and the six "patches" (1: EVER, 2: OKEE, 3: EAST, 4: KRV, 5: SJM, and 6: PP):
 
 $$
 \begin{pmatrix} 
@@ -1628,7 +1669,51 @@ $$
 \end{pmatrix}(t)
 $$
 
-where the elements within $\mathbf{M}_s$ represents movement probability across patches.
+where 
+$$
+\mathbb{M} = \begin{pmatrix}
+      \mathbf{M}_1 = \begin{bmatrix} 
+      m_{1,1} & m_{1,2} & m_{1,3} & m_{1,4} & m_{1,5} & m_{1,6} \\
+      m_{2,1} & m_{2,2} & m_{2,3} & m_{2,4} & m_{2,5} & m_{2,6} \\
+      m_{3,1} & m_{3,2} & m_{3,3} & m_{3,4} & m_{3,5} & m_{3,6} \\
+      m_{4,1} & m_{4,2} & m_{4,3} & m_{4,4} & m_{4,5} & m_{4,6} \\
+      m_{5,1} & m_{5,2} & m_{5,3} & m_{5,4} & m_{5,5} & m_{5,6} \\
+      m_{6,1} & m_{6,2} & m_{6,3} & m_{6,4} & m_{6,5} & m_{6,6} \\
+      \end{bmatrix}_1 & 0 & \cdots & 0 \\
+      0 & \mathbf{M}_2 & \cdots & 0 \\
+      \vdots & \vdots & \ddots & \vdots \\ 
+      0 & 0 & \cdots & \mathbf{M}_S
+\end{pmatrix}
+$$
+
+and the elements within $\mathbf{M}_s$ represents movement probability across patches.
+
+In the very simplified model (2 stages and 2 patches), we have:
+
+$$
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{1,2}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{2,1} \\ n_{2,2}
+  \end{bmatrix}
+\end{pmatrix} (t + 1) = \begin{pmatrix}
+      \mathbf{M}_1 = \begin{bmatrix} 
+      m_{1,1} & m_{1,2} \\
+      m_{2,1} & m_{2,2} 
+      \end{bmatrix}_1 & 0 \\
+      0 & \mathbf{M}_2 
+\end{pmatrix} \times
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{1,2}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{2,1} \\ n_{2,2}
+  \end{bmatrix}
+\end{pmatrix}(t)
+$$
 
 ## Incorporating demography and dispersal with the vec operartor
 
@@ -1767,9 +1852,9 @@ $$
           0 & 0 & 0 & 0 \\ 
           0 & 0 & 0 & 0 \\ 
           0 & 0 & 0 & 0
-  \end{bmatrix} & 1 \begin{bmatrix}
+  \end{bmatrix} & \mathbf{(}1\mathbf{)} \begin{bmatrix}
                   0 & 0 & 0 & 0 \\ 
-                  1 & 0 & 0 & 0 \\ 
+                  \mathbf{(}1\mathbf{)} & 0 & 0 & 0 \\ 
                   0 & 0 & 0 & 0 \\ 
                   0 & 0 & 0 & 0 \\ 
                   0 & 0 & 0 & 0 \\ 
@@ -1935,12 +2020,14 @@ $$
                   \end{bmatrix}
 $$
 
+(the parentheses locate the unique operation that result in something)
+
 Resulting in 
 
 $$
 \mathbf{P} = \begin{pmatrix}
 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
-0 & 0 & 0 & 0 & 1 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & \mathbf{(}1\mathbf{)} & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
@@ -1966,11 +2053,11 @@ $$
 \end{pmatrix}
 $$
 
-And then, iterate the postions. We can use a code to reproduce this
+And then, iterate the positions. We can use a code to reproduce this, but with smaller stages and patches for representative purposes:
 
 ```{r}
-S <- 4 # four stages
-H <- 6 # six patches
+S <- 2 # two stages (J-A)
+H <- 2 # two patches (N-S)
 
 P <- matrix(0, S*H, S*H)
 P
@@ -1989,79 +2076,318 @@ for (s in 1:S){
 P
 ```
 
-The is our ending $\mathbf{P}$. 
+This is our ending $\mathbf{P}$. The trick of this permutation matrix is that it will "help" the projection matrix to first apply the block-demography matrix $\mathbb{B}$ to the population vector organized by patches:
+
+$$
+\text{vec}(\mathbf{N}) = \begin{pmatrix}
+  n_{1,1} \\ 
+  n_{2,1} \\ 
+  n_{1,2} \\
+  n_{2,2}
+  \end{pmatrix},
+$$
+then permute the result to reorganize the population vector by stages:
+$$
+\text{vec}(\mathbf{N}^\top) = \begin{bmatrix}
+  n_{1,1} \\ 
+  n_{1,2} \\ 
+  n_{2,1} \\
+  n_{2,2}
+  \end{bmatrix},
+$$
+applies the block dispersal matrix $\mathbb{M}$, and then permutes the result back to the original organization of the population by patches ($\text{vec}(\mathbf{N})$).
 
 ## Projection matrix with population arrangement by patches under dempography then dispersal
 
-Here we need some biological information of our species, but [Hunter & Caswell (2005)](https://doi.org/10.1016/j.ecolmodel.2005.05.002)) mentioned that the four combinations (of arrangement by patches or stages and sequences of demography then dispersal or dispersal then demography) can be obtained by any other, and that their eigenvalue spectra are identical (we can estimate $\lambda$). Let's use the firs case, population vector arrangement by patches with demography and then dispersal. 
+Here we need some biological information of our species, but [Hunter & Caswell (2005)](https://doi.org/10.1016/j.ecolmodel.2005.05.002)) mentioned that the four combinations (of arrangement by patches or stages and sequences of demography then dispersal or dispersal then demography) can be obtained by any other, and that their eigenvalue spectra are identical (we can estimate $\lambda$). Let's use the firs case, population vector arrangement by patches with demography and then dispersal (Miguel's mentioned this biological grounded decision was taken back in his days). 
 
 $$
 \begin{pmatrix} 
         \mathbf{n}_1 \\
         \vdots \\
         \mathbf{n}_H
-\end{pmatrix} (t+1) = \mathbf{P}^\top \mathcal{M} \mathbf{P} \mathcal{B} \begin{pmatrix} 
+\end{pmatrix} (t+1) = \mathbf{P}^\top \mathbb{M} \mathbf{P} \mathbb{B} \begin{pmatrix} 
         \mathbf{n}_1 \\
         \vdots \\
         \mathbf{n}_H
 \end{pmatrix} (t)
 $$
 
-So, the projection matrix $\textbf{A}$ of $\mathbf{n}(t+1) = \mathbf{A}\mathbf{n}(t)$ becomes $A = \mathbf{P}^\top \mathcal{M} \mathbf{P} \mathcal{B}$. Recall $\mathcal{B}$ is the block-demography matrix to project the population vector organized by patches and $\mathcal{M}$ the block-dispersal matrix to project the population vector organized by stages. The projection matrix applies demography without dispersal, permutes the result to reorganize the population vector by stages and apply dispersal without demography, and then permutes the result back to the original organization of the population by patches.
+So, the projection matrix $\textbf{A}$ of $\mathbf{n}(t+1) = \mathbf{A}\mathbf{n}(t)$ becomes $A = \mathbf{P}^\top \mathbb{M} \mathbf{P} \mathbb{B}$. Recall $\mathbb{B}$ is the block-demography matrix to project the population vector organized by patches and $\mathbb{M}$ the block-dispersal matrix to project the population vector organized by stages. 
 
 # Snail kite project data
 
 We can estimate survival, breeding, and dispersal from the monitoring of snail kites in Florida. 
 
-## Capture-Mark-Recapture model for survival, availability, and detection probabilities
+## Capture-Mark-Recapture model for survival and detection probabilities
 
 My indices:
 $$
 k = 1, \dots, K \text{ individuals (kites)} \\
 t = 1, \dots, T \text{ years (primary periods, }times) \\ 
-r = 1, \dots, R \text{ = 6 surveys within year (secondary periods, }replicates) \\
-s = 1, \dots, S \text{ = 2 stages for now (J vs A), but could be 4 stages (1: <1 yr, 2: 1-2 yrs, 3: 2-12 yrs, 4: >12 yrs)} \\
-h = 1, \dots, H \text{ = 2 stages for now (N vs S), but could be 6 patches (}homes,\ habitats,\ humedales)
+s = 1, \dots, S \text{ = 2 states for now (J vs A), but could be 4 stages (1: <1 yr, 2: 1-2 yrs, 3: 2-12 yrs, 4: >12 yrs)} \\
+h = 1, \dots, H \text{ = 2 states for now (N vs S), but could be 6 patches (}homes,\ habitats,\ humedales)
 $$
 
-We can estimate the parameters: probability that a kite survives from year $t$ to $t+1$ ($\phi_{s,h}$), probability that a surviving kite is present and available for observing during a survey or the temporary emigration ($\eta_{s,h}$), and probability of detection conditional on being alive and available ($p_{s,h}$).
+I am not including $r = 1, \dots, R \text{ = 6 surveys within year (secondary periods, }replicates)$ for now, because the survival is estimated by stage-patch levels.
 
-The latent alive state is 
+Let's think in the ecological states:
 
-$$
-z_{k,t} = \begin{cases}
-  1 \text{, alive} \\
-  0 \text{, dead}
-  \end{cases}
-$$
-With $z_{k, t+1} \sim \text{Bernoulli}(z_{k,t} \phi_{s_{k,t}, h_{k,t}})$
+* Juvenile in the South ($JS$)
+* Adult in the South ($AS$)
+* Juvenile in the North ($JN$)
+* Adult in the North ($AN$)
+* Dead ($D$)
 
-The availability state is
+Therefore, the state matrix (without dispersal) is:
 
 $$
-a_{k,t,r} = \begin{cases}
-  1 \text{, available} \\
-  0 \text{, temporary emigrated}
-  \end{cases}
+\mathbf{\Gamma}_h = 
+  \begin{bmatrix}
+    \phi_{JS} (1-\gamma_S) & \phi_{JS} \gamma_S & 0 & 0 & 1-\phi_{JS} \\
+    0 & \phi_{AS} & 0 & 0 & 1-\phi_{AS} \\
+    0 & 0 & \phi_{JN} (1-\gamma_N) & \phi_{JN} \gamma_N & 1-\phi_{JN} \\
+    0 & 0 & 0 & \phi_{AN} & 1-\phi_{AN} \\
+    0 & 0 & 0 & 0 & 1
+    \end{bmatrix}
+    \begin{matrix} 
+      z_{t-1} = JS = 1 \\
+      z_{t-1} = AS = 2 \\
+      z_{t-1} = JN = 3 \\ 
+      z_{t-1} = AN = 4 \\ 
+      z_{t-1} = Dead = 5 
+    \end{matrix} 
 $$
 
-With completely random emigration $a_{k,t,r} \sim \text{Bernoulli}(\eta_{s_{k,t},h_{k,t}})$
+Rows present the latent state $z_{t-1}$, while columns the next time state $z_{t}$. 
 
-The observation process follows 
-
+From these states, we can assume that detection probability varies by patch (wetland type; north wetlands might have higher detection probability as lacustrine vs lower detection probability in the south as palustrine [Beatty et al. 2025](https://esajournals.onlinelibrary.wiley.com/doi/10.1002/ecy.70242)) but not by age. 
 $$
-y_{k,t,r} \sim \text{Bernoulli}(z_{k,t}\ a_{k,t,r}\ p{s_{k,t},\ h_{k,t}})
+\mathbf{\Omega}_h = \begin{bmatrix}
+    1-p_{S} & p_S & 0 & 0 & 0 \\
+    1-p_{S} & 0 & p_S & 0 & 0 \\
+    1-p_{N} & 0 & 0 & p_N & 0 \\
+    1-p_{N} &  0 & 0 & 0 & p_N \\
+    1 & 0 & 0  & 0 & 0
+    \end{bmatrix}    
+    \begin{matrix} 
+      z_{t} = JS = 1 \\
+      z_{t} = AS = 2 \\
+      z_{t} = JN = 3 \\ 
+      z_{t} = AN = 4 \\ 
+      z_{t} = Dead = 5 
+    \end{matrix} 
 $$
+where observations 1, 2, 3, 4, 5 (columns) correspond to not detected, observed JS, observed AS, observed JN, and observed AN. Detection probability for each state (combination of stage and patch) can be included in this matrix, but adding two parameters more.
 
-This implies that when a kite is resighted is because it has survived, is available to be sampled, and and is detected (obviously) $P(y = 1) = \phi \times \eta \times p$. 
+This state-space structure looks in `NIMBLE` as:
 
-We can use Bayesian inference ([see an useful resource](https://oliviergimenez.github.io/bayesian-hmm-cr-workshop-valencia/)):
-$$
-\text{Pr(hypothesis | data)} = \frac{\text{Pr(data | hypothesis) Pr(hypothesis)}}{\text{Pr(data)}}
-$$
+```{r eval=FALSE}
+multistate <- nimbleCode({
+  
+  # -------------------------------------------------
+  # Parameters:
+  # phiA: survival probability of juveniles in the South
+  # phiB: survival probability of adults in the South
+  # phiC: survival probability of juveniles in the North
+  # phiD: survival probability of adults in the North
+  # gammaA: transition probability from juvenile to adult in the South
+  # gammaB: transition probability from juvenile to adult in the North
+  # pA: recapture probability in the South
+  # pB: recapture probability in the North
+  # -------------------------------------------------
+  # States (z):
+  # 1 alive as JS
+  # 2 alive as AS
+  # 3 alive as JN
+  # 4 alive as AN
+  # 5 dead
+  # Observations (y):  
+  # 1 not seen
+  # 2 seen at S 
+  # 3 seen at N
+  # -------------------------------------------------
+  
+  # priors
+  phiA ~ dunif(0, 1)
+  phiB ~ dunif(0, 1)
+  phiC ~ dunif(0, 1)
+  phiD ~ dunif(0, 1)
+  gammaA ~ dunif(0, 1)
+  gammaB ~ dunif(0, 1)
+  pA ~ dunif(0, 1)
+  pB ~ dunif(0, 1)
 
+  # probabilities of state z(t+1) given z(t)
+  gamma[1,1] <- phiA * (1 - gammaA)
+  gamma[1,2] <- phiA * gammaA
+  gamma[1,3] <- 0
+  gamma[1,4] <- 0
+  gamma[1,5] <- 1 - phiA
+  gamma[2,1] <- 0
+  gamma[2,2] <- phiB
+  gamma[2,3] <- 0
+  gamma[2,4] <- 0
+  gamma[2,5] <- 1 - phiB
+  gamma[3,1] <- 0
+  gamma[3,2] <- 0
+  gamma[3,3] <- phiC * (1 - gammaB)
+  gamma[3,4] <- phiC * gammaB
+  gamma[3,5] <- 1 - phiC
+  gamma[4,1] <- 0
+  gamma[4,2] <- 0
+  gamma[4,3] <- 0
+  gamma[4,4] <- phiD
+  gamma[4,5] <- 1 - phiD
+  gamma[5,1] <- 0
+  gamma[5,2] <- 0
+  gamma[5,3] <- 0
+  gamma[5,4] <- 0
+  gamma[5,5] <- 1
+  
+  # probabilities of y(t) given z(t)
+  omega[1,1] <- 1 - pA     # Pr(alive S t -> non-detected t)
+  omega[1,2] <- pA         # Pr(alive S t -> detected JS t)
+  omega[1,3] <- 0          # Pr(alive S t -> detected AS t)
+  omega[1,4] <- 0          # Pr(alive S t -> detected JN t)
+  omega[1,5] <- 0          # Pr(alive S t -> detected AN t)
+  omega[2,1] <- 1 - pA     # Pr(alive S t -> non-detected t)
+  omega[2,2] <- 0          # Pr(alive S t -> detected JS t)
+  omega[2,3] <- pA         # Pr(alive S t -> detected AS t)
+  omega[2,4] <- 0          # Pr(alive S t -> detected JN t)
+  omega[2,5] <- 0          # Pr(alive S t -> detected AN t)
+  omega[3,1] <- 1 - pB     # Pr(alive N t -> non-detected t)
+  omega[3,2] <- 0          # Pr(alive N t -> detected JS t)
+  omega[3,3] <- 0          # Pr(alive N t -> detected AS t)
+  omega[3,4] <- pB         # Pr(alive N t -> detected JN t)
+  omega[3,5] <- 0          # Pr(alive N t -> detected AN t)
+  omega[4,1] <- 1 - pB     # Pr(alive N t -> non-detected t)
+  omega[4,2] <- 0          # Pr(alive N t -> detected JS t)
+  omega[4,3] <- 0          # Pr(alive N t -> detected AS t)
+  omega[4,4] <- 0          # Pr(alive N t -> detected JN t)
+  omega[4,5] <- pB         # Pr(alive N t -> detected AN t)
+  omega[5,1] <- 1          # Pr(dead t -> non-detected t)
+  omega[5,2] <- 0          # Pr(dead t -> detected JS t)
+  omega[5,3] <- 0          # Pr(dead t -> detected AS t)
+  omega[5,4] <- 0          # Pr(dead t -> detected JN t)
+  omega[5,5] <- 0          # Pr(dead t -> detected AN t)
+  
+  # likelihood 
+  for (k in 1:Kites){
+    # latent state at first capture
+    z[k,first[k]] <- y[k,first[k]] - 1 # First observation determines the latent state: y=2 -> z=1 (JS), 
+    for (t in (first[k]+1):Time){         # y=3 -> z=2 (AS)...
+      # draw (t) given z(t-1)
+      z[k,t] ~ dcat(gamma[z[k,t-1],1:5])
+      # draw y(t) given z(t)
+      y[k,t] ~ dcat(omega[z[k,t],1:5])
+    }
+  }
+})
+```
+
+Now we can adjust the data from the snail kite new database
 
 ```{r}
-library(nimble)
+#Call the downloaded data using Andrew's helpers
+source("skutils/load_helpers.R")
 
+resights <- read_sk_export("resights", dir = "data")
+survey_efforts <- read_sk_export("survey_efforts", dir = "data")
+surveys <- read_sk_export("surveys", dir = "data")
+bands <- read_sk_export("bands", dir = "data") |>
+  filter(color != "USFWS",
+         color != "Unknown") |>
+  mutate(leg = ifelse(leg == "right", "R", "L"), 
+         direction = case_when(direction == "horizontal" ~ "H",
+                               direction == "rotated" ~ "R",
+                               direction == "straight" ~ "S",
+                               direction == "vertical" ~ "V",
+                               TRUE ~ direction),
+         unique.id = paste(leg, color, code, direction, sep = "_"))
+birds <- read_sk_export("birds", dir = "data")
+
+# organize the data and assign region 1:7 (6 used before)
+data <- resights %>%
+  left_join(survey_efforts, join_by(survey_effort_id)) %>%
+  left_join(surveys, join_by(survey_id)) %>%
+  filter(!is.na(bird_id), 
+         survey_code %in% as.character(1:6)) %>%
+#  select(everything()) |> # from here I use the table(data$area.x) to see the locations and assign region
+  mutate(region = case_when(area.x == "A-1 FEB" ~ "EVER",
+                            area.x == "A2-STA" ~ "EVER",
+                            area.x == "Big Cypress National Preserve" ~ "EVER",
+                            area.x == "Lake Marian" ~ "KRV",
+                            area.x == "Lake Kissimmee" ~ "KRV",
+                            area.x == "Lake Tohopekaliga" ~ "KRV",
+                            area.x == "SJM" ~ "SJM",
+                            area.x == "C-43 Reservoir" ~ "N", # To me, this is OKEE (W discharges)
+                            area.x == "Loxahatchee Slough" ~ "EAST",
+                            area.x == "Del Webb" ~ "N", # no idea where is this
+                            area.x == "Kissimmee Restoration Area" ~ "KRV",
+                            area.x == "Lake Okeechobee" ~ "OKEE",
+                            area.x == "Harns Marsh" ~ "N", # To me, this is OKEE (W discharges)
+                            area.x == "Lake Istokpoga" ~ "KRV",
+                            area.x == "East Lake Tohopekaliga" ~ "KRV",
+                            area.x == "WCA2B" ~ "EVER",
+                            area.x == "Lake Parker" ~ "KRV",
+                            area.x == "Powell Creek Preserve" ~ "N", # To me, this is OKEE (W discharges)
+                            area.x == "C-44 Impoundment" ~ "EAST",
+                            area.x == "Lake Jackson" ~ "KRV",
+                            area.x == "Lake Cypress" ~ "KRV",
+                            area.x == "Lake Hatchineha" ~ "KRV",
+                            area.x == "Nubbins Slough STA" ~ "N", # To me, this is OKEE (W discharges)
+                            area.x == "Paynes Prairie" ~ "PP", 
+                            area.x == "Lake Hicpochee Impoundments" ~ "OKEE",
+                            area.x == "Withlacoochee River" ~ "N", # To me, this is NORTH (with PP)
+                            area.x == "WCA3A" ~ "EVER",
+                            area.x == "Lakeside Ranch STA" ~ "OKEE",
+                            area.x == "Everglades National Park" ~ "EVER",
+                            area.x == "Hungryland WEA" ~ "EAST",
+                            area.x == "Grassy Waters Preserve" ~ "EAST",
+                            area.x == "Loxahatchee National Wildlife Refuge" ~ "EVER",
+                            area.x == "STA 1" ~ "EVER",
+                            area.x == "Big Cypress National Preserve" ~ "EVER",
+                            area.x == "C-23 Reservoir" ~ "EAST",
+                            area.x == "STA 5/6" ~ "EVER",
+                            area.x == "Rotenberger WMA" ~ "EVER",
+                            area.x == "Mary A. Mitigation Bank" ~ "SJM",
+                            area.x == "Lake Runnymede" ~ "KRV",
+                            area.x == "STA 2" ~ "EVER",
+                            area.x == "WCA3B" ~ "EVER",
+                            area.x == "Combined Lake Kissimmee Tiger Lake" ~ "KRV",
+                            area.x == "WCA2A" ~ "EVER",
+                            area.x == "STA 3/4" ~ "EVER",
+                            area.x == "Lake Tarpon" ~ "N", # To me, this is NORTH (with PP)
+                            TRUE ~ area.x),
+         month = month(date))
+
+# include individual information and assign the states
+resights_raw_dem <- data |> 
+    left_join(bands) |>
+    left_join(birds) |>
+    mutate(age_num = (year - birth_year)) |>
+    dplyr::select(c(date, survey_code, area.x, breeding_status, unique.id, year, month, region,
+                    age_num, age_class, birth_year)) |>
+    filter(age_num >= 0) |> # 27 age are negative, remove them
+    mutate(
+      state = case_when(age_num <= 1 & region %in% c("EVER", "EAST") ~ 1,
+                        age_num > 1 & region %in% c("EVER", "EAST") ~ 2,
+                        age_num <= 1 & region %in% c("KRV", "N", "OKEE", "PP", "SJM") ~ 3,
+                        age_num > 1 & region %in% c("KRV", "N", "OKEE", "PP", "SJM") ~ 4,
+                        TRUE ~ age_num),
+      age_class_assumed = case_when(age_num >= 13 ~ 4,
+                                       age_num <= 12 & age_num > 2 ~ 3,
+                                       age_num <= 2 & age_num >= 1 ~ 2,
+                                       age_num < 1 ~ 1,
+                                       TRUE ~ age_num), 
+      t = paste0("year_", year))
+# check results
+table(resights_raw_dem$region, resights_raw_dem$state)
+table(resights_raw_dem$age_num, resights_raw_dem$state)
+
+resights_raw_dem |>
+  arrange(year, survey_code) |>
+  pivot_wider(id_cols = unique.id, names_from = t, values_from = state, values_fn = mean, values_fill = 0) |>
+  View()
 ```
