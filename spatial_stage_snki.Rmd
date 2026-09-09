@@ -1,0 +1,3313 @@
+---
+title: "Spatial-stage snail kite model"
+author: "Orlando Acevedo-Charry"
+date: "`r Sys.Date()`"
+output: 
+  bookdown::html_document2:
+    toc: yes
+    toc_float: true
+    number_sections: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# Initial message
+
+To understand better the estimation of a $\lambda$ parameter (asymptotic population growth rate) within a demographic population viability analysis (PVA), I have generated this code following [Hunter & Caswell (2005)](https://doi.org/10.1016/j.ecolmodel.2005.05.002)) manuscript. Although their paper describing the spatial matrix population models that keeps demography and dispersal parameters clearly distinguished is openly available, I struggled to understand the adjustment to the snail kite spatio-demographic PVA. Therefore, many of the text included here belongs to the original paper. I also try to adjust some notation to follow the modeling more clearly in my less advantaged math mind. 
+
+# Population Viability Analysis for snail kite (up to 2023)
+
+This section is the original code from the report, adjusted with data up to 2023 by Orlando Acevedo-Charry to estimate the dominant eigenvalue of the projection matrix $\mathbf{A}$ of a matrix population model. 
+
+```{r eval = FALSE}
+##########################################################
+#Spatial PVA for kites template: 
+#written by Rob Fletcher and Josh Cullen
+##########################################################
+
+#set working directory where data are located
+#setwd(choose.dir())
+
+library(MASS)
+library(expm)   #for matrix powers to calculate growth rate over time
+library(tidyverse)
+library(wesanderson)
+library(future)
+library(furrr)
+library(zoo) #for rolling sum to determine strings of years
+
+
+source('R codes/helper functions_rf_new.R')
+
+#################
+### Load Data ###
+#################
+
+# Survival estimates and Transitions among MUs
+
+##survival_mov_PVA code
+surv<- read.csv("data/survival_estimates_PVA_age.droughtXpop.inv.csv") %>% 
+  mutate(age_cat = case_when(AGE== 'Adult' ~ 'adult',
+                             AGE == 'Juvenile' ~ 'juv'))
+
+disp_ad<- read.csv("data/trans_matrix_adults.csv", header = T)
+rownames(disp_ad)<- disp_ad$X
+disp_ad<- disp_ad[,-1]
+
+new_order <- c("EAST", "EVER", "KRV", "OKEE", "PP", "SJM")
+
+# Reorder both rows and columns
+disp_ad <- disp_ad[new_order, new_order]
+
+disp.SE_ad<- read.csv("data/se.trans_matrix_adults.csv", header = T)
+rownames(disp.SE_ad)<- disp.SE_ad$X
+disp.SE_ad<- disp.SE_ad[,-1]
+
+disp.SE_ad <- disp.SE_ad[new_order, new_order]
+
+disp_juv<- read.csv("data/trans_matrix_juveniles.csv", header = T)
+rownames(disp_juv)<- disp_juv$X
+disp_juv<- disp_juv[,-1]
+
+disp_juv <- disp_juv[new_order, new_order]
+
+disp.SE_juv<- read.csv("data/se.trans_matrix_juveniles.csv", header = T)
+rownames(disp.SE_juv)<- disp.SE_juv$X
+disp.SE_juv<- disp.SE_juv[,-1]
+
+disp.SE_juv <- disp.SE_juv[new_order, new_order]
+
+#disp <- read.csv("PVA/trans_noMov.csv")
+#rownames(disp)<- disp$X
+#disp<- disp[,-1]
+
+#disp.SE <- read.csv("PVA/trans_noMov_se.csv")
+#rownames(disp.SE)<- disp.SE$X
+#disp.SE<- disp.SE[,-1]
+
+
+# Reproductive parameters
+
+##Code_nest_success_young_fledged_PVA code
+NestSurv <- read.csv("data/PVA_nest_success_estimates.csv", header = T) %>% 
+  dplyr::rename(MU = Pop,
+                spei_cat = spei,
+                invaded = inv.cat,
+                NS = ns)
+
+##Code_nest_success_young_fledged_PVA code
+Nfledge <- read.csv("data/PVA_young_fledged_estimates.csv", header = T) %>% 
+  dplyr::rename( Yng_cnt.SE = se,
+                 MU = Pop,
+                 spei_cat = spei,
+                 invaded = inv.cat)
+
+#PVA_NA_NM
+renesting <- read.csv("data/nest_attempts_PVA.csv", header = T) %>%   #pooled across age
+  dplyr::rename(Attempt = mean,
+                Attempt.SE = se) 
+
+
+#breedingprob_spei_PVA code
+breedprob <- read.csv("data/PVA_breedingprob_est_age_inv.csv", header = T) %>%
+  dplyr::rename(Breed = mean,
+                spei_cat = spei,
+                Breed.SE = se,
+                invaded = inv.cat) %>% 
+  mutate(age_cat = case_when(age_cat== 'A' ~ 'adult',
+                             age_cat == 'J' ~ 'juv'))
+
+
+# Load minimum number of sighted (banded + unbanded) birds per year and MU for K
+K.annual <- read.csv("data/min.known.alive.forPVA.2Apr2025.csv") %>% 
+  dplyr::select(-X) 
+
+K.annual<- K.annual %>% 
+  filter(Year >= 2019)   #subset to only include 2019-present so representative of current conditions (i.e., exotic snails)
+
+#detectability ratio: adjust based on difference between pop estimate and MNKA
+K.annual[is.na(K.annual)] <- 0
+K.annual$det <- round(rowSums(K.annual[,2:7], na.rm = T)/K.annual$PopSize, 3)  
+K.annual$det <- ifelse(K.annual$det > 1, 1, K.annual$det) #one year slightly > 1
+K.annual[,2:7] <- round(K.annual[,2:7] / K.annual$det, 0)  
+
+#proportion for starting distributions
+K.annual.prop <- K.annual
+K.annual.prop[is.na(K.annual)] <- 0
+K.annual.prop <- cbind(K.annual$Year, K.annual.prop[, 2:7] / rowSums(K.annual.prop[, 2:7]))
+
+
+
+#####################
+### Reformat Data ###
+#####################
+
+# Create DF for demographic rates
+survNo <- surv %>% 
+  filter(drought == "No")
+
+survNormal <- survNo %>% 
+  mutate (spei_cat = case_when (drought == "No" ~ "Normal"))
+
+survWet <- survNo %>% 
+  mutate (spei_cat = case_when (drought == "No" ~ "Wet"))
+
+survDrought <- surv %>% 
+  filter(drought == "Yes") %>% 
+  mutate (spei_cat = case_when (drought == "Yes" ~ "Drought"))
+
+surv2 <- rbind(survDrought, survNormal, survWet)
+
+demo.df<- surv2 %>% 
+  dplyr::rename(MU = stratum, S = estimate, S.SE = se, S_LCL = lcl, S_UCL = ucl) %>% 
+  dplyr::select(-X,
+                -AGE) %>% 
+  arrange(MU, spei_cat, age_cat) %>% 
+  relocate(age_cat, .after = MU) 
+
+
+
+# Add estimates from repro params
+demo.df2<- demo.df %>% 
+  full_join(., breedprob[,c("MU","spei_cat","age_cat","Breed","Breed.SE", "invaded")],
+            by = c("MU","spei_cat","age_cat", "invaded")) %>%  #need to decide what to do with age_cat beacuse they are different form survival
+  left_join(., NestSurv[,c("MU","spei_cat","NS","NS_SE","ns_lower","ns_upper", "invaded")],
+            by = c("MU","spei_cat", "invaded")) %>% 
+  left_join(., Nfledge[,c("MU","spei_cat","Yng_cnt","Yng_cnt.SE", "invaded")],
+            by = c("MU","spei_cat", "invaded")) %>% 
+  left_join(., renesting[,c("MU","spei_cat","Attempt","Attempt.SE")],
+            by = c("MU","spei_cat")) %>% 
+  filter(invaded == "Yes") %>% 
+  dplyr::select(MU, age_cat, spei_cat, S, S.SE, Breed, Breed.SE, 
+                NS, NS_SE, Yng_cnt, Yng_cnt.SE, Attempt, Attempt.SE)
+
+#Add NA to Attempts (conditional on breeding)
+demo.df2$Attempt<- ifelse(is.na(demo.df2$Breed) | demo.df2$Breed == 0, NA, demo.df2$Attempt)
+demo.df2$Attempt.SE<- ifelse(is.na(demo.df2$Breed) | demo.df2$Breed == 0, NA, demo.df2$Attempt.SE)
+
+# Replace NAs with imputed values
+#We have no information on PP and droughts or wet (there were no droughts or wet after 2018 when Snail Kites colonized) so we use the same breeding probability than for normal years
+demo.df2$Breed<- ifelse(demo.df2$MU == "PP" & is.na(demo.df2$Breed),
+                        demo.df2$Breed[demo.df2$MU == "PP" & demo.df2$spei_cat == "Normal"],
+                        demo.df2$Breed)
+demo.df2$Breed.SE<- ifelse(demo.df2$MU == "PP" & is.na(demo.df2$Breed.SE),
+                           demo.df2$Breed.SE[demo.df2$MU == "PP" & demo.df2$spei_cat == "Normal"],
+                           demo.df2$Breed.SE)
+
+#Rest of NA correspond to no individuals breeding so they are 0
+demo.df2$Breed<- ifelse(is.na(demo.df2$Breed) | demo.df2$Breed == 0,
+                        1e-5,
+                        demo.df2$Breed)
+demo.df2$Breed.SE<- ifelse(is.na(demo.df2$Breed.SE) | demo.df2$Breed.SE == 0,
+                           1e-5,
+                           demo.df2$Breed.SE)
+
+#NAs for NS correspond to no nests
+demo.df2$NS<- ifelse(is.na(demo.df2$NS) | demo.df2$NS == 0, 1e-5, demo.df2$NS)
+demo.df2$NS_SE<- ifelse(is.na(demo.df2$NS_SE) | demo.df2$NS_SE < 1e-5, 1e-5, demo.df2$NS_SE)
+
+#We have no information on PP and droughts or wet (there were no droughts or wet after 2018 when Snail Kites colonized) so we use the same nest attempts than for normal years
+demo.df2$Attempt<- ifelse(demo.df2$MU == "PP" & is.na(demo.df2$Attempt),
+                          demo.df2$Attempt[demo.df2$MU == "PP" & demo.df2$spei_cat == "Normal"],
+                          demo.df2$Attempt)
+demo.df2$Attempt.SE<- ifelse(demo.df2$MU == "PP" & is.na(demo.df2$Attempt.SE),
+                             demo.df2$Attempt.SE[demo.df2$MU == "PP" & demo.df2$spei_cat == "Normal"],
+                             demo.df2$Attempt.SE)
+
+demo.df2$Attempt<- ifelse(is.na(demo.df2$Attempt), 1, demo.df2$Attempt)
+demo.df2$Attempt.SE<- ifelse(is.na(demo.df2$Attempt.SE), 0, demo.df2$Attempt.SE)
+
+#NAs for Yng_cnt correspond to no nests
+demo.df2$Yng_cnt<- ifelse(is.na(demo.df2$Yng_cnt), 0, demo.df2$Yng_cnt)
+demo.df2$Yng_cnt.SE<- ifelse(is.na(demo.df2$Yng_cnt.SE), 0, demo.df2$Yng_cnt.SE)
+
+
+
+##############################################
+#   DEFINE DEMOGRAPHY AND MOVEMENT RATES     #
+##############################################
+
+# Set key features of population
+Np <- 6 # Number of patches
+Ns <- 2 # Number of stages
+
+#------------------------------------------#
+# Build the vec-permutation matrix (eq 9)
+#------------------------------------------#
+
+P <- matrix(0, Ns*Np, Ns*Np)
+
+for (i in 1:Ns){
+  for (j in 1:Np){
+    E <- matrix(0,Ns,Np)
+    E[i,j] <- 1
+    P <- P + kronecker(E,t(E))   
+  }
+}
+
+
+
+##########################################################################
+##########################################################################
+#Population Projections over observed time intervals
+##########################################################################
+##########################################################################
+
+#1000 total reps: Nrep * Nclimaterep: 20*50 = 1000
+
+Nrep <- 10  # number of draws from demographic rates. OAC changed this from 20
+Nstart2023 <- 1410  # adult females in 2023
+#Nstart2024 <- round(2007/2,0) #adult females in 2024
+
+#Number of projected years
+t <- 10             # year 1 is start year (i.e., 2024). OAC changed this from 31, because we want here the deterministic lambdas
+Nclimaterep <- 10   #random draws of climate categories. OAC changed this from 50
+
+take <- c(0, 0.2, 0.5) #c(0,0.1,0.2,0.3,0.4,0.5)
+nTake <- length(take)
+
+
+
+###############################
+# SPEI and Drought Setup (Baseline Only)
+###############################
+
+set.seed(123)
+spei.proj <- vector("list", Nclimaterep)
+for(i in 1:Nclimaterep){
+  spei.proj[[i]] <- data.frame(baseline = sample(c("Drought", "Normal", "Wet"), 
+                                                 t, replace = TRUE, 
+                                                 prob = c(0.09, 0.84, 0.07))) #This is the frequency of extreme values in the past years (i.e., no change in climate scenario for the future)
+  
+}  
+
+
+###############################
+# PREPARE STORAGE FOR RESULTS
+###############################
+
+
+
+sim_results <- vector("list", Nclimaterep)
+for(j in 1:Nclimaterep){
+  sim_results[[j]] <- vector("list", Nrep)
+  for(k in 1:Nrep){
+    sim_results[[j]][[k]] <- vector("list", nTake)
+    names(sim_results[[j]][[k]]) <- paste0("take_", take)
+  }
+}
+
+# Create parallel storage for carrying capacity values
+Klow_store <- vector("list", Nclimaterep)
+for(j in 1:Nclimaterep){
+  Klow_store[[j]] <- vector("list", Nrep)
+  for(k in 1:Nrep){
+    Klow_store[[j]][[k]] <- vector("list", nTake)
+    names(Klow_store[[j]][[k]]) <- paste0("take_", take)
+  }
+}
+
+
+# storage for the MU “take” at time = 1
+take_store <- vector("list", Nclimaterep)
+for(j in seq_len(Nclimaterep)) {
+  take_store[[j]] <- vector("list", Nrep)
+  for(k in seq_len(Nrep)) {
+    take_store[[j]][[k]] <- vector("list", nTake)
+    names(take_store[[j]][[k]]) <- paste0("take_", take)
+  }
+}
+
+# Define the names for the new multiplier scenarios:
+multiplier_names <- c("optimistic", "status_quo", "pessimistic")
+
+MU_names <- c("EAST", "EVER", "KRV", "OKEE", "PP", "SJM")
+
+###################################
+### Run matrix projection model ###
+###################################
+
+# Deterministic lambda per patch        
+lambda_patch_store <- list()
+
+# Deterministic lambda for the metapopulation          
+lambda_meta_store <- list()
+          
+
+#loop through SPEI replicates 
+for (j in 1:Nclimaterep) {  
+  #loop through replicate demographic draws
+  for (k in 1:Nrep) {         
+    
+    #random draw of starting distribution based on 2019-2023 distributions
+    MU.prop<- K.annual.prop[sample(nrow(K.annual.prop), size = 1), 2:7]
+    
+    #In case we want to use the 2023 distributions
+    #MU.prop_2023<- K.annual.prop[5, 2:7]
+    
+    #EAST, EVER, KRV, OKEE, PP, SJM
+    Na <- round(Nstart2023 * MU.prop * 0.8) #80% adults
+    Nj <- round(Nstart2023 * MU.prop * 0.2) #20% sub-adults
+    N <-  t(rbind(Nj, Na))
+    
+    # Random draw of carrying capacity for rep (2019-2023)
+    year.ind<- sample(x = 2019:2023, size = t, replace = TRUE)
+    
+    #create matrix of K for MU x t; randomly sample from distribution based on year
+    K<- sapply(year.ind, function(x) K.annual[K.annual$Year == x, c(2:7)] / 2)  #divide by 2 to account only for females
+    K<- matrix(unlist(K), nrow = 6, ncol = t, byrow = FALSE)  #convert from list to matrix
+    K[is.na(K)]<- 0  #change NAs to 0
+    
+    
+    # Loop over each "take" value
+    for (n in 1:nTake) {
+      # Distribute "take" proportionally among MUs:
+      floaters_1 <- round(take[n] * Nstart2023 * MU.prop, 0)
+      
+      state0 <- N #starting population size is the same for all take scenarios
+      state0_vec <- as.vector(t(state0))
+      
+      # Create extra lists in storage for the multiplier scenarios:
+      sim_results[[j]][[k]][[n]] <- list()
+      #store carrying capacity
+      Klow_store[[j]][[k]][[n]] <- list()
+      # store the number removed per MU
+      take_store[[j]][[k]][[n]] <- floaters_1
+      
+      ###########################
+      # Now loop over multiplier scenarios
+      ###########################
+      for (p in seq_along(multiplier_names)) {
+        mult_name <- multiplier_names[p]
+        # Draw a multiplier from the appropriate range:
+        if(mult_name == "optimistic"){
+          mult_val <- 1.25
+        } else if(mult_name == "status_quo"){
+          mult_val <- 1
+        } else if(mult_name == "pessimistic"){
+          mult_val <- 0.75
+        }
+        
+        # Compute Klow for this scenario:
+        Klow <- round(mult_val * K, 0)
+        # Preallocate a matrix to store the Klow values used at each time step:
+        Klow_used <- matrix(NA, nrow = Np, ncol = t)
+        
+        
+        sim_state_take <- matrix(NA, nrow = Np * Ns, ncol = t)
+        sim_state_take[,1] <- state0_vec #starting size at t =1
+        
+        
+        #loop through time
+        for (i in 2:t) {         
+          
+          print(c( j, k, take[n], mult_name, i))
+          
+          #create matrices for breeding/survival and dispersal
+          B.t <- getB(x = demo.df2, spei = spei.proj[[j]]$baseline[i]) #function for creating B matrix
+          B.t.float <- getB_floater(x = demo.df2, spei = spei.proj[[j]]$baseline[i]) #function for creating B matrix
+          
+          # OAC: Deterministic lambda for each patch
+          for(h in 1:Np){
+            idx <- ((h-1)*Ns + 1):(h*Ns)
+            B.patch <- B.t[idx, idx]
+            eigB <- eigen(B.patch)
+            lambda_patch <- Re(
+              eigB$values[which.max(Re(eigB$values))]
+            )
+            lambda_patch_store[[length(lambda_patch_store)+1]] <-
+              data.frame(
+                climate_rep = j,
+                dem_rep     = k,
+                take        = take[n],
+                management  = mult_name,
+                year        = i,
+                MU          = MU_names[h],
+                lambda_patch = lambda_patch
+              )
+          }
+          
+          #dispersal matrix: 
+          M.t <- getM2(disp_ad = t(disp_ad), disp_ad.SE = t(disp.SE_ad),
+                       disp_juv = t(disp_juv), disp_juv.SE = t(disp.SE_juv))
+          
+          #M.t <- getM(disp = t(disp), disp.SE = t(disp.SE))
+          # Store Klow for this time step:
+          Klow_used[, i] <- Klow[, i]
+          
+          #vec permutation: demography then dispersal by pop vector by *patches*
+          A.t <- t(P) %*% M.t %*% P %*% B.t   
+          A.t.float <- t(P) %*% M.t %*% P %*% B.t.float
+          
+          # OAC: Deterministic lambda for the metapopulation
+          eigA <- eigen(A.t)
+          lambda_meta <- Re(eigA$values[which.max(Re(eigA$values))])
+          lambda_meta_store[[length(lambda_meta_store) + 1]] <- data.frame(
+            climate_rep = j,
+            dem_rep     = k,
+            take        = take[n],
+            management  = mult_name,
+            year        = i,
+            lambda_meta = lambda_meta
+          )
+          
+          #vec permutation: demography then dispersal by pop vector by *stages*
+          #A.t <-  M.t %*% P %*% B.t %*% t(P)  
+          
+          # Get population at previous time step and reshape into MU x stage matrix
+          state_prev <- round(sim_state_take[, i - 1], 0)
+          state_prev_mat <- matrix(state_prev, nrow = Np, ncol = Ns, byrow = TRUE)
+          total_prev <- rowSums(state_prev_mat)
+          
+          # floaters from K:
+          flo_K <- total_prev - Klow[,i]  #if positive, above carrying capacity->floaters
+          flo_K[flo_K < 0 ] <- 0
+          
+          # floaters from "take" only applies at i=2:
+          flo_all <- if(i==2) flo_K + floaters_1 else flo_K
+          
+          breeders <- as.numeric(total_prev - flo_all)
+          breeders[breeders < 0 ] <- 0
+          breed_frac <- breeders / total_prev
+          breed_frac[is.nan(breed_frac)] <- 0
+          
+          
+          #get number of breeders and floaters
+          ns.mat.breeder <- state_prev_mat * breed_frac #applies to juv/adults
+          ns.mat.breeder[is.nan(ns.mat.breeder)] <- 0
+          ns.mat.breeder.vec <- round(as.vector(t(ns.mat.breeder)),0)
+          ns.mat.floater <- state_prev_mat - ns.mat.breeder 
+          ns.mat.floater.vec <- round(as.vector(t(ns.mat.floater)),0)
+          
+          
+          #project new pop size based on demographics of floaters/breeders
+          N.t.i.breed <- A.t %*%  ns.mat.breeder.vec
+          N.t.i.float <- A.t.float %*% ns.mat.floater.vec
+          
+          #sum
+          sim_state_take[,i] <- round(N.t.i.breed + N.t.i.float,0)
+          
+        }#end for i
+        
+        # Summarize Results for This "Take" Value
+        # Aggregate across stages to get total MU population per time step.
+        MU_pop <- matrix(NA, nrow = Np, ncol = t)
+        for (i in 1:t) {
+          state_i <- sim_state_take[, i]
+          state_i_mat <- matrix(state_i, nrow = Np, ncol = Ns, byrow = TRUE)
+          MU_pop[, i] <- rowSums(state_i_mat)
+        }
+        
+        # Store the MU x time matrix for this replicate and take value.
+        sim_results[[j]][[k]][[n]][[mult_name]] <- MU_pop
+        
+        # Store the Klow matrix for this replicate and take:
+        Klow_store[[j]][[k]][[n]][[mult_name]] <- Klow_used
+        
+      }#end for p
+      
+    }#end for n
+    
+  } #end for k
+  
+} #end for j
+
+# Recovery Deterministic lambdas
+df_lambda_meta <- bind_rows(lambda_meta_store)
+df_lambda_patch <- bind_rows(lambda_patch_store)
+
+saveRDS(df_lambda_meta, file = "data/df_lambda_meta.RDS")
+saveRDS(df_lambda_patch, file = "data/df_lambda_patch.RDS")
+
+#the final part of this code is for the figures, so I cut it here and leave it for now.
+```
+
+```{r eval=FALSE, echo=FALSE}
+# continuation of the PVA_taken_manag_new.R code
+
+# Flatten the nested sim_results list into a tibble.
+df_results <- imap_dfr(sim_results, function(climate_elem, climate_index) {
+  imap_dfr(climate_elem, function(demo_elem, dem_rep) {
+    imap_dfr(demo_elem, function(take_elem, take_name) {
+      # Extract the numeric take value from its name ("take_0", etc.)
+      take_val <- as.numeric(gsub("take_", "", take_name))
+      imap_dfr(take_elem, function(mult_elem, mult_name) {
+        mu_names <- rownames(mult_elem)
+        if (is.null(mu_names)) {
+          mu_names <- MU_names
+        }
+        # mult_elem is a matrix: rows = MU, columns = time steps.
+        n_time <- ncol(mult_elem)
+        tibble(
+          MU           = rep(mu_names, each = n_time),
+          year         = rep(seq_len(n_time), times = nrow(mult_elem)),
+          pop          = as.vector(t(mult_elem)),  # flatten row-wise
+          climate_rep  = climate_index,
+          dem_rep      = dem_rep,
+          take         = take_val,
+          management   = mult_name
+        )
+      })
+    })
+  })
+})
+
+#write.csv(df_results, "data/df_results.csv")
+
+# Filter by management
+df_statusquo <- df_results %>% 
+  filter(management =="status_quo")
+
+df_opt <- df_results %>% 
+  filter(management =="optimistic")
+
+df_pes <- df_results %>% 
+  filter(management =="pessimistic")
+
+
+#Plot of population trajectories at no take and status quo management
+df_take0 <- df_statusquo %>% 
+  filter(take == 0) %>%
+  mutate(calendar_year = 2022 + year)  # so year=1 -> 2024, year=31 -> 2054
+
+
+df_plot <- df_take0 %>%
+  group_by(MU, calendar_year) %>%
+  mutate(pop2 = pop*2) %>%
+  dplyr::summarize(
+    mean_pop = mean(pop2, na.rm = TRUE),
+    lower_95 = quantile(pop2, 0.025, na.rm = TRUE),
+    upper_95 = quantile(pop2, 0.975, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+df_start <- df_take0  %>%  
+  mutate(pop2 = pop*2) %>%
+  filter(year == 1) %>%            # or calendar_year == 2024
+  group_by(MU) %>%
+  dplyr::summarize(start_pop = mean(pop2, na.rm = TRUE), .groups = "drop")
+
+
+ggplot(df_plot, aes(x = calendar_year)) +
+  # Ribbon for the 95% interval
+  geom_ribbon(aes(ymin = lower_95, ymax = upper_95),
+              fill = "blue", alpha = 0.2) +
+  # Mean line
+  geom_line(aes(y = mean_pop), color = "black", size = 1) +
+  
+  # Dashed red line for the MU-specific mean start_pop
+  geom_hline(
+    data = df_start,
+    aes(yintercept = start_pop),
+    linetype = "dashed",
+    color = "red"
+  ) +
+  
+  facet_wrap(~ MU, scales = "free_y") +
+  
+  # Labels and theme
+  labs(
+    x = "Calendar Year",
+    y = "Population size",
+    #title = "Population Trajectories (Take = 0)"
+  ) +
+  scale_x_continuous(breaks = seq(2024, 2054, 5)) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.border = element_rect(color = "grey", fill = NA, linewidth = 0.5),
+    strip.text = element_text(face = "bold")
+  )
+
+
+#with three take values (the maximum and with no take):
+
+df_take <- df_statusquo %>% 
+  filter(take %in% c(0, 0.2, 0.5)) %>% 
+  mutate(calendar_year = 2023 + (year - 1))  
+
+
+df_plot <- df_take %>%
+  group_by(MU, calendar_year, take) %>%
+  mutate(pop2 = pop*2) %>%
+  dplyr::summarize(
+    mean_pop = mean(pop2, na.rm = TRUE),
+    lower_95 = quantile(pop2, 0.025, na.rm = TRUE),
+    upper_95 = quantile(pop2, 0.975, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+df_start <- df_take %>%  
+  mutate(pop2 = pop*2)%>%
+  filter(year == 1) %>%
+  group_by(MU, take) %>%
+  dplyr::summarize(start_pop = mean(pop2, na.rm = TRUE), .groups = "drop")
+
+df_start %>% 
+  pivot_wider(values_from = start_pop,
+              names_from = take)
+
+df_plot <- df_plot %>% 
+  mutate(take = factor(take, levels = c("0", "0.2", "0.5"),
+                             labels = c("0", "20%", "50%")))
+
+ggplot(df_plot, aes(x = calendar_year, group = factor(take))) +
+  # Ribbon for the 95% interval, with fill based on take value
+  geom_ribbon(aes(ymin = lower_95, ymax = upper_95, fill = factor(take)), alpha = 0.2) +
+  # Mean population line, with color based on take value
+  geom_line(aes(y = mean_pop, color = factor(take)), size = 1) +
+  # Dashed horizontal line for mean starting population
+  geom_hline(data = df_start, aes(yintercept = start_pop), color = "grey60",
+             linetype = "dashed") +
+  facet_wrap(~ MU, scales = "free_y") +
+  labs(
+    x = "Calendar Year",
+    y = "Population Size",
+    #title = "Population Trajectories at each MU",
+    fill = "Breeders\n removed",
+    color = "Breeders\n removed"
+  ) +
+  scale_x_continuous(breaks = seq(2023, 2053, 5)) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.border = element_rect(color = "grey", fill = NA, linewidth = 0.5),
+    strip.text = element_text(face = "bold")
+  )
+
+
+#add population growth /lambda by MU
+N.mu.pop<- df_results %>% 
+  mutate(calendar_year = 2022 + year) %>%
+  group_by(climate_rep,dem_rep, take, management, MU) %>% 
+  mutate(lambda = pop / lag(pop)) %>% 
+  mutate(lambda3yr = rollapply(lambda, 3, mean, fill=NA, align = "center", partial=T))
+
+#make sure there are no NaN / infinite
+N.mu.pop$lambda[is.infinite(N.mu.pop$lambda)] = NA
+N.mu.pop$lambda[is.nan(N.mu.pop$lambda)] = NA
+N.mu.pop$lambda3yr[is.infinite(N.mu.pop$lambda3yr)] = NA
+N.mu.pop$lambda3yr[is.nan(N.mu.pop$lambda3yr)] = NA
+
+#get summary values across time
+N.mu.pop.sum<- N.mu.pop %>%
+  filter(calendar_year > 2023) %>% #remove burnin
+  group_by(climate_rep,dem_rep, take, management, MU) %>%
+  summarize(Ntot_2053 = last(pop),
+            lambda_mean = mean(lambda, na.rm = T),
+            lambda_geommean = exp(mean(log(lambda), na.rm = T)),
+            lambda3yr_mean = mean(lambda3yr, na.rm = T),
+            lambda3yr_geommean = exp(mean(log(lambda3yr), na.rm = T))
+  ) 
+
+# Define palette for MUs
+pal<- c(wes_palette('Darjeeling1', n = 5),
+        wes_palette('Darjeeling2', n = 2)[2])
+pal<- pal[c(1,4,3,2,5,6)]
+
+par(mfrow = c(1, 1))
+
+
+#plots at no take
+N.mu.pop.sum0 <- N.mu.pop.sum %>% 
+  filter (take == 0)
+
+N.mu.pop.sum0 <- N.mu.pop.sum0 %>% 
+  mutate(management = factor(management, levels = c("pessimistic", "status_quo", "optimistic"),
+                             labels = c("Pessimistic", "Status quo", "Optimistic")))
+
+
+#Plot population at time 2050 by MU for each management scenario
+MU_size_fig <- ggplot(data = N.mu.pop.sum0, aes(x=management, y = Ntot_2054*2, fill= MU)) +
+  #geom_point(position = position_jitter(width = 0.03), size = 0.8, shape = 21, alpha = 0.5) +
+  geom_violin(width = 0.8, alpha = 0.5, color = "grey40", adjust = 1.5, trim = T) +
+  geom_boxplot(width = 0.1, alpha = 0.7, color = "grey40", outlier.shape = NA) +
+  scale_fill_manual("", values = pal, guide=FALSE) +
+  labs(x = "Management scenario", y = "Population size at 2054") +
+  #scale_y_continuous(breaks = seq(0, 1000, by = 250)) +
+  facet_wrap( ~ MU, ncol = 2) +
+  #coord_flip()+
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 0, hjust=0.5),
+        strip.text = element_text(size = 12, face = 'bold'),
+        strip.background = element_blank())
+
+
+#growth rate
+
+#3 year growth rate
+MU_growth_fig <- ggplot(data = N.mu.pop.sum0, aes(x=management, y = lambda3yr_geommean, fill = MU)) +
+  geom_hline(yintercept = 1, linetype = "dashed")+
+  #geom_point(position = position_jitter(width = 0.05), size = 0.5, shape = 21, alpha = 0.3) +
+  geom_violin(width = 0.8, alpha = 0.5, color = "grey40", adjust = 1.5, trim = T) +
+  geom_boxplot(width = 0.1, alpha = 0.7, color = "grey40", outlier.shape = NA) +
+  #scale_color_manual("", values = pal, guide=FALSE) +
+  scale_fill_manual("", values = pal, guide=FALSE) +
+  labs(x = "", y = "3-year population growth") +
+  ylim(c(0.85, 1.1)) +
+  facet_wrap( ~ MU, ncol = 2) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 0, hjust=0.5),
+        strip.text = element_text(size = 12, face = 'bold'),
+        strip.background = element_blank())
+
+
+
+
+
+
+## Plot superpopulation estimates ##
+df_super_byrep <- df_results %>% 
+  mutate(calendar_year = 2022 + year) %>% 
+  mutate(pop2 = pop * 2) %>%  
+  group_by(climate_rep, dem_rep, calendar_year, take, management) %>% 
+  summarize(total_pop = sum(pop2, na.rm = TRUE), .groups = "drop")
+
+df_super <- df_super_byrep %>% 
+  group_by(calendar_year, take, management) %>%
+  summarize(
+    mean_pop = mean(total_pop, na.rm = TRUE),
+    lower_95 = quantile(total_pop, 0.025, na.rm = TRUE),
+    upper_95 = quantile(total_pop, 0.975, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+
+  
+#extract k values  
+df_Klow <- imap_dfr(Klow_store, function(climate_elem, climate_index) {
+  imap_dfr(climate_elem, function(demo_elem, dem_rep) {
+    imap_dfr(demo_elem, function(take_elem, take_name) {
+      # Convert take name "take_0" to numeric value 0, etc.
+      take_val <- as.numeric(gsub("take_", "", take_name))
+      imap_dfr(take_elem, function(mult_elem, mult_name) {
+        # Determine the number of time steps in this matrix.
+        n_time <- ncol(mult_elem)
+        # Retrieve row names; if missing, use the default MU_names.
+        mu_names <- rownames(mult_elem)
+        if (is.null(mu_names)) {
+          mu_names <- MU_names
+        }
+        tibble(
+          MU           = rep(mu_names, each = n_time),
+          year         = rep(seq_len(n_time), times = length(mu_names)),
+          Klow_val     = as.vector(t(mult_elem)),  # flatten row-wise
+          climate_rep  = climate_index,
+          dem_rep      = dem_rep,
+          take         = take_val,
+          management   = mult_name
+        )
+      })
+    })
+  })
+})
+
+#write.csv(df_Klow, "df_klow2.csv")
+
+df_K_sum <- df_Klow %>%
+  filter(year >1) %>% 
+  group_by(climate_rep, dem_rep, year, take, management) %>%
+  dplyr::summarize(
+    total_K = sum(Klow_val*2, na.rm = TRUE), .groups = "drop") 
+
+
+df_Klow_avg <- df_K_sum %>%
+  group_by(take, management) %>% 
+  dplyr::summarize(
+    mean_Klow = mean(total_K, na.rm = TRUE)
+  ) 
+
+
+#plot at no take
+df_super_take0 <- df_super %>% 
+  filter(take == 0)
+
+df_start <- df_super_take0 %>% 
+  filter(calendar_year == 2023)
+
+df_Klow_avg0 <- df_Klow_avg %>% 
+  filter(take == 0)
+
+
+
+df_super_take0 <- df_super_take0  %>% 
+  mutate(management = factor(management, levels = c("pessimistic", "status_quo", "optimistic"),
+                             labels = c("Pessimistic", "Status quo", "Optimistic")))
+
+
+df_start <- df_start %>%
+  mutate(management = factor(management, 
+                             levels = c("pessimistic", "status_quo", "optimistic"),
+                             labels = c("Pessimistic", "Status quo", "Optimistic")))
+
+
+df_Klow_avg0 <- df_Klow_avg0 %>%
+  mutate(management = factor(management, 
+                             levels = c("pessimistic", "status_quo", "optimistic"),
+                             labels = c("Pessimistic", "Status quo", "Optimistic")))
+
+
+ggplot(df_super_take0, aes(x = calendar_year)) +
+  # Ribbon for the 95% interval
+  geom_ribbon(aes(ymin = lower_95, ymax = upper_95),
+              fill = "blue", alpha = 0.2) +
+  # Mean line
+  geom_line(aes(y = mean_pop), color = "black", size = 1) +
+  
+  # Dashed red line for the MU-specific mean start_pop
+  geom_hline(
+    data = df_start,
+    aes(yintercept = mean_pop),
+    linetype = "dashed",
+    color = "red"
+  ) +
+  # Dashed horizontal line for mean carrying capacity
+  geom_hline(data = df_Klow_avg0, aes(yintercept =  mean_Klow), color = "black",
+             linetype = "dashed") +
+  
+  facet_wrap(~ management) +
+  
+  # Labels and theme
+  labs(
+    x = "Calendar Year",
+    y = "Population size",
+    #title = "Population Trajectories (Take = 0)"
+  ) +
+  scale_x_continuous(breaks = seq(2023, 2053, 5)) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.border = element_rect(color = "grey", fill = NA, linewidth = 0.5),
+    strip.text = element_text(face = "bold")
+  )
+
+
+#with three take values at management "status quo"
+
+df_super_take <- df_super %>% 
+  filter(take %in% c(0, 0.2, 0.5),
+        management == "status_quo") 
+
+
+df_start <- df_super_take %>% 
+  filter(calendar_year == 2023,
+         take == 0) #starting population size is the same independently of take
+
+
+df_Klow_avg <- df_Klow_avg %>% 
+  filter(take %in% c(0, 0.2, 0.5),
+         management == "status_quo")
+
+df_super_take <- df_super_take %>% 
+  mutate(take = factor(take, levels = c("0", "0.2", "0.5"),
+                       labels = c("0", "20%", "50%")))
+
+ggplot(df_super_take, aes(x = calendar_year, group = factor(take))) +
+  # Ribbon for the 95% interval, with fill based on take value
+  geom_ribbon(aes(ymin = lower_95, ymax = upper_95, fill = factor(take)), alpha = 0.2) +
+  # Mean population line, with color based on take value
+  geom_line(aes(y = mean_pop, color = factor(take)), size = 1) +
+  # Dashed horizontal line for mean starting population
+  geom_hline(data = df_start, aes(yintercept =  mean_pop), color = "grey60",
+             linetype = "dashed") +
+  # Dashed horizontal line for mean carrying capacity
+  #geom_hline(data = df_Klow_avg, aes(yintercept =  mean_Klow), color = "black",
+  #           linetype = "dashed") +
+  labs(
+    x = "Calendar Year",
+    y = "Population Size",
+    #title = "Population Trajectories RW",
+    fill = "Breeders\n removed",
+    color = "Breeders\n removed"
+  ) +
+  scale_x_continuous(breaks = seq(2023, 2053, 5)) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.border = element_rect(color = "grey", fill = NA, linewidth = 0.5),
+    strip.text = element_text(face = "bold")
+  )
+
+
+
+
+#get mean size
+df_super %>% 
+  filter(calendar_year == 2032) # it was 2053
+
+
+#add population growth /lambda
+N.mu <- df_super_byrep %>% 
+  group_by(climate_rep, dem_rep, take, management) %>% 
+  mutate(lambda = total_pop / lag(total_pop)) %>% 
+  mutate(lambda3yr = rollapply(lambda, 3, mean, fill=NA, align = "center", partial=T))
+
+unique(N.mu$lambda)
+N.mu$lambda[is.infinite(N.mu$lambda)] = NA
+N.mu$lambda[is.nan(N.mu$lambda)] = NA
+N.mu$lambda3yr[is.infinite(N.mu$lambda3yr)] = NA
+N.mu$lambda3yr[is.nan(N.mu$lambda3yr)] = NA
+
+N.mu.sum<- N.mu %>%
+  filter(calendar_year > 2023) %>% #remove burnin
+  group_by(climate_rep, dem_rep, calendar_year, take, management) %>%
+  summarize(Ntot_2053 = last(total_pop),
+            lambda_mean = mean(lambda, na.rm = T),
+            lambda_geommean = exp(mean(log(lambda), na.rm = T)),
+            lambda3yr_mean = mean(lambda3yr, na.rm = T),
+            lambda3yr_geommean = exp(mean(log(lambda3yr), na.rm = T))
+  ) 
+
+#get mean 3-year growth 
+N.mu.sum %>%
+  group_by(take, management) %>%
+  summarize(lambda_mean = mean(lambda3yr_geommean, na.rm = T),
+            lambda_median = median(lambda3yr_geommean, na.rm = T) )
+
+N.mu %>%
+  filter(calendar_year == 2032) %>% # it was 2050
+  group_by(take, management) %>%
+  summarize(Ntot= mean(total_pop))
+
+#plot at no take
+N.mu.sum0 <- N.mu.sum %>% 
+  filter(take == 0)
+
+N.mu.sum0 <- N.mu.sum0  %>% 
+  mutate(management = factor(management, levels = c("pessimistic", "status_quo", "optimistic"),
+                             labels = c("Pessimistic", "Status quo", "Optimistic")))
+
+Sup_growth_fig <- ggplot(data = N.mu.sum0, aes(x=management, y = lambda3yr_geommean)) +
+  geom_hline(yintercept = 1, linetype = "dashed")+
+  #geom_point(position = position_jitter(width = 0.05), size = 0.5, shape = 21, alpha = 0.3) +
+  geom_violin(width = 1, alpha = 0.6, adjust = 1.5, trim = T, fill = "steelblue") +
+  geom_boxplot(width = 0.1, alpha = 0.5, outlier.shape = NA, fill = "lightblue") +
+  #scale_color_manual("", values = pal, guide=FALSE) +
+  #scale_fill_manual("", values = pal, guide=FALSE) +
+  labs(x = "Management scenario", y = "3-year population growth") +
+  ylim(c(0.85, 1.1)) +
+ # facet_wrap( ~ MU, ncol = 2) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 0, hjust=0.5),
+        strip.text = element_text(size = 12, face = 'bold'),
+        strip.background = element_blank())
+
+
+
+
+#Plot super-population at time 2053 at different management scenarios
+size_fig <- ggplot(data = N.mu.sum0, aes(x=management, y = Ntot_2054)) +
+  geom_point(position = position_jitter(width = 0.03), size = 0.8, shape = 21, alpha = 0.5, fill = "grey40") +
+  geom_violin(width = 1, alpha = 0.6, adjust = 1.5, trim = T, fill = "steelblue") +
+  geom_boxplot(width = 0.1, alpha = 0.5, outlier.shape = NA, fill = "lightblue") +
+  labs(x = "Management scenario", y = "Population size at 2053") +
+  ylim(c(0,4000))+
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10)
+  )
+
+#plot at different take values, management status quo 
+
+N.mu.sum_status <- N.mu.sum %>% 
+  filter(management == "status_quo")
+
+N.mu.sum_status<- N.mu.sum_status%>% 
+  mutate(take = factor(take, levels = c("0","0.1", "0.2","0.3","0.4", "0.5"),
+                       labels = c("0","10", "20", "30","40","50")))
+
+
+size_fig2 <- ggplot(data = N.mu.sum_status, aes(x=factor(take), y = Ntot_2053, fill = factor(take))) +
+  geom_point(position = position_jitter(width = 0.03), size = 0.8, shape = 21, alpha = 0.5, fill = "grey40") +
+  geom_violin(width = 1, alpha = 0.6, adjust = 1.5, trim = T) +
+  geom_boxplot(width = 0.1, alpha = 0.5, outlier.shape = NA) +
+  scale_fill_brewer(name = "Take value", 
+                    type = "seq", 
+                    palette = "Reds") +
+  labs(x = "Percentage of breeders removed", y = "Population size at 2053") +
+  ylim(c(1000,3300))+
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        legend.position = "none"
+  )
+
+
+
+#Box plots to compare between takes at 1,5 and 10 years by MU (management status quo)
+desired_years <- c(2, 6, 11) #because year 1 is the start year (i.e. 2024)
+
+df_desired <- df_statusquo  %>% 
+  filter(year %in% desired_years) %>% 
+  mutate(pop2 = pop*2)
+
+df_desired<- df_desired %>% 
+  mutate(take = factor(take, levels = c("0","0.1", "0.2","0.3","0.4", "0.5"),
+                       labels = c("0","10%", "20%", "30%","40%","50%")))
+
+
+take_plot <- ggplot(df_desired, aes(x = factor(year), y = pop2, fill = factor(take))) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  scale_fill_brewer(name = "Breeders\n removed", 
+                    type = "seq", 
+                    palette = "Reds") +
+  scale_x_discrete(
+    breaks = c("2", "6", "11"),                             
+    labels = c("2" = "1" ,"6" = "5", "11" = "10")  
+  ) +
+  labs(
+    x = "Time (Years)",
+    y = "Population Size",
+    fill = "Take Value",
+  ) +
+  facet_wrap( ~ MU, scales = "free_y", ncol = 2) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 0, hjust=0.5),
+        strip.text = element_text(size = 12, face = 'bold'),
+        strip.background = element_blank())
+
+#get the means
+take_MU_mean <- df_desired %>% 
+  group_by(MU, year, take) %>% 
+  summarize(meanPop = mean(pop2)) %>% 
+  pivot_wider(values_from = meanPop,
+              names_from = year)
+
+#write.csv(take_MU_mean, "take mean by MU 2023.csv")
+
+#at super population level
+df_super_byrep2 <- df_results %>%  
+  mutate(pop2 = pop * 2) %>%  
+  group_by(climate_rep, dem_rep, year, take, management) %>% 
+  summarize(total_pop = sum(pop2, na.rm = TRUE), .groups = "drop")
+
+
+df_desired_super <- df_super_byrep2  %>% 
+  filter(management == "status_quo",
+    year %in% desired_years)
+
+df_desired_super<- df_desired_super %>% 
+  mutate(take = factor(take, levels = c("0","0.1", "0.2","0.3","0.4", "0.5"),
+                       labels = c("0","10%", "20%", "30%","40%","50%")))
+
+
+take_plot_super <- ggplot(df_desired_super, aes(x = factor(year), y = total_pop, fill = factor(take))) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  scale_fill_brewer(name = "Breeders\n removed", 
+                    type = "seq", 
+                    palette = "Reds") +
+  scale_x_discrete(
+    breaks = c("2", "6", "11"),                             
+    labels = c("2" = "1" ,"6" = "5", "11" = "10")  
+  ) +
+  labs(
+    x = "Time (Years)",
+    y = "Population Size",
+    fill = "Take Value",
+  ) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 0, hjust=0.5),
+        strip.text = element_text(size = 12, face = 'bold'),
+        strip.background = element_blank())
+
+
+
+
+#plots of the difference in population size at different take values
+
+df_take_diff <- df_desired %>%
+  mutate(pop2 = pop*2) %>% 
+  group_by(MU, year, climate_rep, dem_rep) %>%
+  mutate(pop_0 = pop2[take == 0],
+         diffN_from0 = pop2 - pop_0)
+
+
+
+diff_plot <- ggplot(df_take_diff, aes(x = factor(year), y = diffN_from0, fill = factor(take))) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  ylim(-120,80)+
+  scale_fill_brewer(name = "Breeders\n removed", 
+                   type = "seq", 
+                   palette = "Reds") +
+  scale_x_discrete(
+    breaks = c("2", "6", "11"),                             # which factor levels to label
+    labels = c("2" = "1" ,"6" = "5", "11" = "10")  
+  )+
+  facet_wrap( ~ MU, ncol = 2) +
+  labs(
+    x = "Time (years)",
+    y = "Difference in population size",
+    fill = "Take value"
+  ) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 0, hjust=0.5),
+        strip.text = element_text(size = 12, face = 'bold'),
+        strip.background = element_blank())
+
+
+#at super population level
+df_take_diff_super <- df_desired_super %>%
+  group_by( year, climate_rep, dem_rep) %>%
+  mutate(pop_0 = total_pop[take == 0],
+         diffN_from0 = total_pop - pop_0)
+
+
+diff_plot_super <- ggplot(df_take_diff_super, aes(x = factor(year), y = diffN_from0, fill = factor(take))) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  ylim(-400,300)+
+  scale_fill_brewer(name = "Breeders\n removed", 
+                    type = "seq", 
+                    palette = "Reds") +
+  scale_x_discrete(
+    breaks = c("2", "6", "11"),                             # which factor levels to label
+    labels = c("2" = "1" ,"6" = "5", "11" = "10")  
+  ) +
+  labs(
+    x = "Time (years)",
+    y = "Difference in population size",
+    fill = "Take value"
+  ) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 0, hjust=0.5),
+        strip.text = element_text(size = 12, face = 'bold'),
+        strip.background = element_blank())
+
+
+
+
+#get the mean values
+df_take_diff_mean <- df_take_diff %>% 
+  group_by(MU, take, year) %>% 
+  summarize(meanDiff = mean(diffN_from0))
+
+#Mean initial values of take per MU
+
+
+
+df_removed <- purrr::imap_dfr(take_store, function(clim, climate_rep) {
+  purrr::imap_dfr(clim, function(demo, dem_rep) {
+    purrr::imap_dfr(demo, function(take_vec, take_name) {
+      take_val <- as.numeric(sub("take_","", take_name))
+      # coerce to plain numeric and reassign MU names
+      tv       <- as.numeric(unlist(take_vec))
+      names(tv)<- MU_names
+      
+      # now one row per MU
+      tibble::enframe(tv, name = "MU", value = "removed") %>%
+        dplyr::mutate(
+          climate_rep = climate_rep,
+          dem_rep     = dem_rep,
+          take        = take_val
+        ) %>%
+        dplyr::select(climate_rep, dem_rep, take, MU, removed)
+    })
+  })
+})
+
+
+unique(df_removed$MU)
+
+#write.csv(df_removed, "df_removed.csv")
+
+df_take_init <- df_removed  %>%
+  group_by(MU, take) %>%
+  summarize(mean_init = mean(removed),
+         lower_95 = quantile(removed, 0.025, na.rm = TRUE),
+         upper_95 = quantile(removed, 0.975, na.rm = TRUE))
+
+
+#write.csv(df_take_init, "take_init_MU_2023.csv")
+
+
+df_take_init_super <- df_removed  %>%
+  group_by(take,climate_rep,dem_rep) %>%
+  summarize(total_rem = sum(removed)) %>% 
+  group_by(take) %>% 
+  summarise(mean_init = mean(total_rem),
+            lower_95 = quantile(total_rem, 0.025, na.rm = TRUE),
+            upper_95 = quantile(total_rem, 0.975, na.rm = TRUE))
+
+
+df_start_take <- df_super_take %>% 
+  filter(calendar_year == 2023)
+
+#plot lambda at different take values at 1, 5, and 10 years
+
+N.mu.pop_desired <- N.mu.pop %>% 
+  filter(management == "status_quo",
+         year %in% desired_years)
+
+
+N.mu.pop_desired <- N.mu.pop_desired %>% 
+  mutate(take = factor(take, levels = c("0","0.1", "0.2","0.3","0.4", "0.5"),
+                       labels = c("0","10%", "20%", "30%","40%","50%")))
+
+
+take_plot_lambda <- ggplot(N.mu.pop_desired , aes(x = factor(year), y = lambda, fill = factor(take))) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  #geom_violin(width = 1, alpha = 0.6, adjust = 1.5, trim = T) +
+  #ylim(0.4,3)+
+  scale_fill_brewer(name = "Breeders\n removed", 
+                    type = "seq", 
+                    palette = "Reds") +
+  geom_hline(yintercept = 1, linetype = "dashed")+
+  scale_x_discrete(
+    breaks = c("2", "6", "11"),                             
+    labels = c("2" = "1" ,"6" = "5", "11" = "10")  
+  ) +
+  labs(
+    x = "Time (Years)",
+    y = "Local Growth Rate",
+    fill = "Take Value",
+  ) +
+  facet_wrap( ~ MU, scales = "free_y", ncol = 2) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 0, hjust=0.5),
+        strip.text = element_text(size = 12, face = 'bold'),
+        strip.background = element_blank())
+
+
+#at super population 
+
+N.mu_desired <- N.mu %>% 
+  mutate(year = calendar_year - 2022) %>% 
+  filter(management == "status_quo",
+         year %in% desired_years)
+
+pop_take_mean <- N.mu_desired  %>% 
+  group_by(take, year) %>% 
+  summarise(mean_pop = mean (total_pop))
+
+N.mu_desired <- N.mu_desired %>% 
+  mutate(take = factor(take, levels = c("0","0.1", "0.2","0.3","0.4", "0.5"),
+                       labels = c("0","10%", "20%", "30%","40%","50%")))
+
+
+take_plot_lambda_super <- ggplot(N.mu_desired , aes(x = factor(year), y = lambda, fill = factor(take))) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  #geom_violin(width = 1, alpha = 0.6, adjust = 1.5, trim = T) +
+  #ylim(0.9,1.05)+
+  scale_fill_brewer(name = "Breeders\n removed", 
+                    type = "seq", 
+                    palette = "Reds") +
+  geom_hline(yintercept = 1, linetype = "dashed")+
+  scale_x_discrete(
+    breaks = c("2", "6", "11"),                             
+    labels = c("2" = "1" ,"6" = "5", "11" = "10")  
+  ) +
+  labs(
+    x = "Time (Years)",
+    y = "Growth Rate",
+    fill = "Take Value",
+  ) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 0, hjust=0.5),
+        strip.text = element_text(size = 12, face = 'bold'),
+        strip.background = element_blank())
+
+
+lambda_take_mean <- N.mu_desired %>% 
+  group_by(take, year) %>% 
+  summarise(mean_lambda=mean(lambda),
+            median_lambda =median(lambda))
+```
+
+I reduced some values to make quick computation. In addition, I saved the deterministic $\lambda$ (per patch $\lambda_{\mathbf{B}_{h}}$ and for the metapopulation $\lambda_{\mathbf{A}}$) to have the values below. 
+
+```{r}
+library(tidyverse)
+
+lambda_metaP <- readRDS(here::here("data/df_lambda_meta.RDS")) %>%  # the here::here() anchors the file paths to the main project root, no matter where the .Rmd file is sitting.
+  mutate(take = factor(take, levels = c("0", "0.2", "0.5"),
+                             labels = c("0%", "20%", "50%"))) |>
+  filter(management == "status_quo")
+
+lambda_patchB <- readRDS(here::here("data/df_lambda_patch.RDS")) %>% 
+  mutate(take = factor(take, levels = c("0", "0.2", "0.5"),
+                             labels = c("0%", "20%", "50%"))) |>
+  filter(management == "status_quo")
+
+mean_lambda_A <- lambda_metaP |>
+  summarise(mean_lambda_A = mean(lambda_meta), 
+            .groups = "drop")
+mean_lambda_A
+
+ggplot(lambda_metaP, aes(x = year + 2022, 
+                         y = lambda_meta, 
+                         color = take)) +
+  geom_jitter(alpha = 0.2, width = 0.1) +
+  geom_hline(yintercept = 1, lty = 1) +
+  geom_hline(data = mean_lambda_A, yintercept = mean_lambda_A$mean_lambda_A, lty = 2) +
+  labs(x = "Year of projection (10 years ahead 2023)",
+       y = expression(lambda[bold(A)]), 
+       color = "Breeders\nremoved") +
+  theme_bw() +
+  theme(strip.background = element_blank())
+
+mean_lambda_B <- lambda_patchB |>
+  group_by(MU) |>
+  summarise(mean_lambda_B = mean(lambda_patch))
+mean_lambda_B
+
+ggplot(lambda_patchB, aes(x = year + 2022, 
+                         y = lambda_patch, 
+                         color = take)) +
+  facet_grid(~MU) +
+  geom_jitter(alpha = 0.2, width = 0.1) +
+  geom_hline(yintercept = 1, lty = 1) +
+  geom_hline(data = mean_lambda_B, aes(yintercept = mean_lambda_B), lty = 2) +
+  labs(x = "Year of projection (10 years ahead 2023)",
+       y = expression(lambda[bold(B)[h]]), 
+       color = "Breeders\nremoved") +
+  theme_bw() +
+  theme(strip.background = element_blank(), axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+```
+
+But, how this model was elaborated? How we can improved/updated? In what follows, I will try to understand the spatial and demographically structured matrix population model from the perspective of our snail kite project.
+
+# Spatial and demographically structured matrix population model
+
+Snail kites are segregated spatially in Florida as a metapopulation. The species are also demographically categorized in different stages. Let $H$ be the number of patches ($h = 1, 2, \dots, H$) and $S$ be the number of stages ($s = 1,2,...,S$). The matrix model describing the population can be $\mathbf{n}(t+1) = \mathbf{A}\mathbf{n}(t)$, with the vector $\mathbf{n}$ including densities (abundance, counts) of each patch or each stage at time $t$. The projection matrix, $\mathbf{A}$, includes demographic and/or dispersal processes, with the asymptotic population growth rate, $\lambda$, being the dominant eigenvalue of $\mathbf{A}$. 
+
+Following [Hunter & Caswell (2005)](https://doi.org/10.1016/j.ecolmodel.2005.05.002)), the state of the population can be described by the matrix:
+
+$$
+\mathbf{N}(t) = \begin{pmatrix} 
+        n_{1,1} & n_{1,2} &  ... & n_{1,H} \\ 
+        n_{2,1} & n_{2,2} &  ... & n_{2,H} \\ 
+       \vdots & \vdots & \ddots & \vdots \\ 
+        n_{S,1} & n_{S,2} & ... & n_{S,H}
+\end{pmatrix}(t)
+$$
+
+In the specific case of snail kites, $n_{s,h}$ can be the detection-corrected minimum known to be alive abundance of stage $s$ in patch $h$ at time $t$. The population vector $\mathbf{n}$ can be seen as the stages or patches arrangement of $\mathbf{N}$:
+
+$$
+\mathbf{n}_{\text{patches}} = \begin{pmatrix} 
+        \mathbf{n}_1 \\
+        \vdots \\
+        \mathbf{n}_H
+\end{pmatrix} 
+= 
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{2,1} \\ \vdots \\ n_{S,1} 
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  \vdots \\
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{1,H} \\ n_{2,H} \\ \vdots \\ n_{S,H} 
+  \end{bmatrix}
+\end{pmatrix}
+$$
+
+Note that the subvectors give the stage distribution within each patch $h$. Complementary, the subvectors in the stages arrangement give the spatial distribution of each stage $s$. 
+
+$$
+\mathbf{n}_{\text{stages}} = \begin{pmatrix} 
+        \mathbf{n}_1 \\
+        \vdots \\
+        \mathbf{n}_S
+\end{pmatrix} = \begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} & n_{1,2} & \cdots & n_{1,H} \\
+  \end{bmatrix} \\
+    \begin{bmatrix}
+  \cdots \\
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{S,1} & n_{S,2} & \cdots & n_{S,H} 
+  \end{bmatrix}
+\end{pmatrix}
+$$
+
+The transposed matrix is more similar (convenient?) to the $\mathbf{n}_{\text{patches}}$:
+
+$$
+\mathbf{n}_{\text{stages}} = \begin{pmatrix} 
+        \mathbf{n}_1^\top \\
+        \vdots \\
+        \mathbf{n}_S^\top
+\end{pmatrix} = \begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{1,2} \\ \vdots \\ n_{1,H} \\
+  \end{bmatrix} \\
+    \begin{bmatrix}
+  \vdots \\
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{S,1} \\ n_{S,2} \\ \cdots \\ n_{S,H} 
+  \end{bmatrix}
+\end{pmatrix}
+$$
+
+## Model demography without dispersal
+
+Let $\mathbf{B}_h$ be the $s \times s$ demographic projection matrix for patch $h$ (Lefkovitch matrix), the matrix model describing the population for this patch is $\mathbf{n}_h(t+1) = \mathbf{B}_h\mathbf{n}_h(t)$. Without dispersal, the metapopulation would be projected by a block diagonal matrix $\mathbb{B}$. Let's use four (at an annual resolution level) potential stages in snail kites (**1**: nestlings between 0 and 24 days and young of the year (G:ACD) $0-1$ year (0-12 months), **2**: juveniles or young adults of $1$ to $2$ years (12 to 24 months), last exactly 1 year, **3**: adult 2 to 12 years, and **4**: old adult $≥13$; based on the SNKI Handbook), and the six "patches" (1: EVER, 2: OKEE, 3: EAST, 4: KRV, 5: SJM, and 6: PP):
+
+$$
+\begin{pmatrix} 
+        \mathbf{n}_1 \\
+        \mathbf{n}_2 \\
+        \mathbf{n}_3 \\
+        \mathbf{n}_4 \\
+        \mathbf{n}_5 \\
+        \mathbf{n}_6 
+\end{pmatrix} (t + 1) = \begin{pmatrix}
+      \mathbf{B}_1 & 0 & \cdots & 0 \\
+      0 & \mathbf{B}_2 & \cdots & 0 \\
+      \vdots & \vdots & \ddots & \vdots \\ 
+      0 & 0 & \cdots & \mathbf{B}_H
+\end{pmatrix} \times
+\begin{pmatrix} 
+        \mathbf{n}_1 \\
+        \mathbf{n}_2 \\
+        \mathbf{n}_3 \\
+        \mathbf{n}_4 \\
+        \mathbf{n}_5 \\
+        \mathbf{n}_6 
+\end{pmatrix}(t)
+$$
+
+Or: 
+$$
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{2,1} \\ n_{3,1} \\ n_{4,1}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  \vdots \\
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{1,6} \\ n_{2,6} \\ n_{3,6} \\ n_{4,6}
+  \end{bmatrix}
+\end{pmatrix} (t + 1) = \begin{pmatrix}
+      \mathbf{B}_1 = \begin{bmatrix} 
+      0 & F_2 & F_3 & F_4 \\
+      G_1 & 0 & 0 & 0  \\
+      0 & G_2 & Q_3 & 0 \\
+      0 & 0 & G_3 & Q_4\\
+      \end{bmatrix}_1 & 0 & \cdots & 0 \\
+      0 & \mathbf{B}_2 & \cdots & 0 \\
+      \vdots & \vdots & \ddots & \vdots \\ 
+      0 & 0 & \cdots & \mathbf{B}_H
+\end{pmatrix} \times
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{2,1} \\ n_{3,1} \\ n_{4,1}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  \vdots \\
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{1,6} \\ n_{2,6} \\ n_{3,6} \\ n_{4,6}
+  \end{bmatrix}
+\end{pmatrix}(t)
+$$
+where 
+$$
+\mathbb{B} = \begin{pmatrix}
+      \mathbf{B}_1 = \begin{bmatrix} 
+      0 & F_2 & F_3 & F_4 \\
+      \phi_1 & 0 & 0 & 0  \\
+      0 & \phi_2 & \phi_3 (1 - \psi_{3 \rightarrow 4}) & 0 \\
+      0 & 0 & \phi_3 \psi_{3 \rightarrow 4} & \phi_4\\
+      \end{bmatrix}_1 & 0 & \cdots & 0 \\
+      0 & \mathbf{B}_2 & \cdots & 0 \\
+      \vdots & \vdots & \ddots & \vdots \\ 
+      0 & 0 & \cdots & \mathbf{B}_H
+\end{pmatrix}
+$$
+and the elements within $\mathbf{B}_h$ represents different population parameters. Let's begin with the transitions subdiagonals $G_s$ of the Lefkovitch matrix, which can be parameterized as $G_s = \phi_s \psi_s$, where $\phi_s$ is annual survivorship and $\psi_s$ is the probability of advancing to the next stage given survival. Stage 1 and 2 are fixed in time, so an individual surviving a year in stage 1 **must** enter stage 2, and an individual surviving a year in stage 2 **must** enter stage 3; transitions $G_1$ and $G_2$ in the Lefkovitch matrix is represented by the annual survival $\phi_1$ and $\phi_2$, respectability. In stage 3 (2-12 yr), an individual can survive and remain in stage 3, can survive and become >12 (stage 4), or can die. This transition is parameterized as $G_3 = \phi_3 \gamma_3$. Stage 4 is the terminal stage, so there is no "transition" ($G_4 = 0$). The conditions of our stage means that the diagonal of stage survival probability $Q_s$ (the probability to stay at stage $s$; $Q_s = \phi_s (1 - \gamma_s)$) is 0 for stages 1 and 2. In stage 3, this stage survival probability becomes $Q_3 = \phi_3 (1-\gamma_3)$ (the individual survive stage 3 and does not transition to stage 4). Because individuals in the terminal stage (4) do not transition to a next stage, the stage survival probability is the annual survival probability $Q_4 = \phi_4$. Finally, we have the fertility. Evidently, individuals within stage 1 ($<1$ year) do not have fertility, so $F_1 = 0$. The fertility of the different stages from 2 to 4 is represented by $F_2$, $F_3$, and $F_4$. 
+
+This model can be simplify to include only two stages: 1) juveniles or young adults and 2) adults (including old scenecent adults, but see [Reichert et al. 2010](https://nsojournals.onlinelibrary.wiley.com/doi/10.1111/j.1600-0706.2010.18366.x) and [Reichert et al. 2016](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0162690)):
+$$
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{2,1}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  \vdots \\
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{1,6} \\ n_{2,6} 
+  \end{bmatrix}
+\end{pmatrix} (t + 1) = \begin{pmatrix}
+      \mathbf{B}_1 = \begin{bmatrix} 
+      F_1 & F_2  \\
+      \phi_1 & \phi_2
+      \end{bmatrix}_1 & 0 & \cdots & 0 \\
+      0 & \mathbf{B}_2 & \cdots & 0 \\
+      \vdots & \vdots & \ddots & \vdots \\ 
+      0 & 0 & \cdots & \mathbf{B}_H
+\end{pmatrix} \times
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{2,1}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  \vdots \\
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{1,6} \\ n_{2,6}  
+  \end{bmatrix}
+\end{pmatrix}(t)
+$$
+
+And even further simplified with only two regions (e.g., north and south):
+
+$$
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{2,1}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{1,2} \\ n_{2,2} 
+  \end{bmatrix}
+\end{pmatrix} (t + 1) = \begin{pmatrix}
+      \mathbf{B}_1 = \begin{bmatrix} 
+      F_1 & F_2  \\
+      \phi_1 & \phi_2
+      \end{bmatrix}_1 & 0 \\
+      0 & \mathbf{B}_2 
+\end{pmatrix} \times
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{2,1}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{1,2} \\ n_{2,2}  
+  \end{bmatrix}
+\end{pmatrix}(t)
+$$
+
+Annual survival $\phi_{s,h}$ (and detection probability $p_{s,h}$) can be estimated with a multistate Capture-Mark-Recapture model. Fertility can be estimated with the product of survival and the per capita fecundity rate (the number of female offspring/female/year), which can be a product of four lower-level reproductive parameters: annual breeding probability, number of nesting attempts/breeder/year, probability of nest success, and number of female young fledged/successful nest.
+
+## Model dispersal without demography
+
+Let $\mathbf{M}_s$ be the $h \times h$ dispersal matrix for stage $s$, so that $m_{ij}^{(s)}$ is the probability that an individual of stage $s$ moves from patch $j$ to patch $i$. Then dispersal would be described by a block diagonal matrix $\mathbb{M}$. Again, lets use the four potential stages in snail kites (**1**: Nestlings between 0 and 24 days - this is the stage to mark them and young of the year (G:ACD) $<1$ year (0-12 months), **2**: Juveniles or young adults $1$ to $2$ years (12 to 24 months), last exactly 1 year, **3**: adult 2 to 12 years, and **4**:  old adult $≥13$; based on the SNKI Handbook) and the six "patches" (1: EVER, 2: OKEE, 3: EAST, 4: KRV, 5: SJM, and 6: PP):
+
+$$
+\begin{pmatrix} 
+        \mathbf{n}_1^\top \\
+        \mathbf{n}_2^\top \\
+        \mathbf{n}_3^\top \\
+        \mathbf{n}_4^\top 
+\end{pmatrix} (t + 1)
+= \begin{pmatrix}
+      \mathbf{M}_1 & 0 & \cdots & 0 \\
+      0 & \mathbf{M}_2 & \cdots & 0 \\
+      \vdots & \vdots & \ddots & \vdots \\ 
+      0 & 0 & \cdots & \mathbf{M}_S
+\end{pmatrix} \times
+\begin{pmatrix} 
+        \mathbf{n}_1^\top \\
+        \mathbf{n}_2^\top \\
+        \mathbf{n}_3^\top \\
+        \mathbf{n}_4^\top 
+\end{pmatrix}(t)
+$$
+
+Or:
+$$
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{1,2} \\ n_{1,3} \\ n_{1,4} \\ n_{1,5} \\ n_{1,6}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  \vdots \\
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{4,1} \\ n_{4,2} \\ n_{4,3} \\ n_{4,4} \\ n_{4,5} \\ n_{4,6}
+  \end{bmatrix}
+\end{pmatrix} (t + 1) = \begin{pmatrix}
+      \mathbf{M}_1 = \begin{bmatrix} 
+      m_{1,1} & m_{1,2} & m_{1,3} & m_{1,4} & m_{1,5} & m_{1,6} \\
+      m_{2,1} & m_{2,2} & m_{2,3} & m_{2,4} & m_{2,5} & m_{2,6} \\
+      m_{3,1} & m_{3,2} & m_{3,3} & m_{3,4} & m_{3,5} & m_{3,6} \\
+      m_{4,1} & m_{4,2} & m_{4,3} & m_{4,4} & m_{4,5} & m_{4,6} \\
+      m_{5,1} & m_{5,2} & m_{5,3} & m_{5,4} & m_{5,5} & m_{5,6} \\
+      m_{6,1} & m_{6,2} & m_{6,3} & m_{6,4} & m_{6,5} & m_{6,6} \\
+      \end{bmatrix}_1 & 0 & \cdots & 0 \\
+      0 & \mathbf{M}_2 & \cdots & 0 \\
+      \vdots & \vdots & \ddots & \vdots \\ 
+      0 & 0 & \cdots & \mathbf{M}_S
+\end{pmatrix} \times
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{1,2} \\ n_{1,3} \\ n_{1,4} \\ n_{1,5} \\ n_{1,6}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  \vdots \\
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{4,1} \\ n_{4,2} \\ n_{4,3} \\ n_{4,4} \\ n_{4,5} \\ n_{4,6}
+  \end{bmatrix}
+\end{pmatrix}(t)
+$$
+
+where 
+$$
+\mathbb{M} = \begin{pmatrix}
+      \mathbf{M}_1 = \begin{bmatrix} 
+      m_{1,1} & m_{1,2} & m_{1,3} & m_{1,4} & m_{1,5} & m_{1,6} \\
+      m_{2,1} & m_{2,2} & m_{2,3} & m_{2,4} & m_{2,5} & m_{2,6} \\
+      m_{3,1} & m_{3,2} & m_{3,3} & m_{3,4} & m_{3,5} & m_{3,6} \\
+      m_{4,1} & m_{4,2} & m_{4,3} & m_{4,4} & m_{4,5} & m_{4,6} \\
+      m_{5,1} & m_{5,2} & m_{5,3} & m_{5,4} & m_{5,5} & m_{5,6} \\
+      m_{6,1} & m_{6,2} & m_{6,3} & m_{6,4} & m_{6,5} & m_{6,6} \\
+      \end{bmatrix}_1 & 0 & \cdots & 0 \\
+      0 & \mathbf{M}_2 & \cdots & 0 \\
+      \vdots & \vdots & \ddots & \vdots \\ 
+      0 & 0 & \cdots & \mathbf{M}_S
+\end{pmatrix}
+$$
+
+and the elements within $\mathbf{M}_s$ represents movement probability across patches.
+
+In the very simplified model (2 stages and 2 patches), we have:
+
+$$
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{1,2}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{2,1} \\ n_{2,2}
+  \end{bmatrix}
+\end{pmatrix} (t + 1) = \begin{pmatrix}
+      \mathbf{M}_1 = \begin{bmatrix} 
+      m_{1,1} & m_{1,2} \\
+      m_{2,1} & m_{2,2} 
+      \end{bmatrix}_1 & 0 \\
+      0 & \mathbf{M}_2 
+\end{pmatrix} \times
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{1,2}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{2,1} \\ n_{2,2}
+  \end{bmatrix}
+\end{pmatrix}(t)
+$$
+
+## Incorporating demography and dispersal with the vec operartor
+
+Reconstructing a model that maintains the block diagonal forms of the demography and dispersal matrices requires converting a population vector organized by patches into a population vector organizes by stages and vice versa:
+
+$$
+\mathbf{n}_{\text{patches}} = \text{vec}(\textbf{N}) \\ 
+\mathbf{n}_{\text{stages}} = \text{vec}(\textbf{N}^\top)
+$$
+
+And these vectors are related by the *vec-permutation matrix* $\mathbf{P}$
+$$
+\text{vec}(\textbf{N}^\top) = \mathbf{P}\ \text{vec}(\textbf{N})
+$$
+
+To me, it is easier to understand this by seeing in the matrix form in detail. The matrix $\mathbf{N}$ (for snail kites in Florida) is:
+
+$$
+\mathbf{N} = \begin{pmatrix} 
+        n_{1,1} & n_{1,2} & n_{1,3} & n_{1,4} & n_{1,5} & n_{1,6} \\ 
+        n_{2,1} & n_{2,2} & n_{2,3} & n_{2,4} & n_{2,5} & n_{2,6} \\ 
+        n_{3,1} & n_{3,2} & n_{3,3} & n_{3,4} & n_{3,5} & n_{3,6} \\ 
+        n_{4,1} & n_{4,2} & n_{4,3} & n_{4,4} & n_{4,5} & n_{4,6}
+\end{pmatrix}
+$$
+
+Recall each row is a stage and each column is a patch. The "transposed" matrix is:
+
+$$
+\mathbf{N}^\top = \begin{bmatrix} 
+        n_{1,1} & n_{2,1} & n_{3,1} & n_{4,1} \\ 
+        n_{1,2} & n_{2,2} & n_{3,2} & n_{4,2} \\ 
+        n_{1,3} & n_{2,3} & n_{3,3} & n_{4,3} \\ 
+        n_{1,4} & n_{2,4} & n_{3,4} & n_{4,4} \\
+        n_{1,5} & n_{2,5} & n_{3,5} & n_{4,5} \\
+        n_{1,6} & n_{2,6} & n_{3,6} & n_{4,6} 
+\end{bmatrix}
+$$
+
+The $\text{vec}$ operator stacks the columns of a matrix one on top of the other. Something like:
+
+$$
+\text{vec}(\mathbf{N}) = \begin{pmatrix}
+  n_{1,1} \\ 
+  n_{2,1} \\ 
+  n_{3,1} \\ 
+  n_{4,1} \\
+  n_{1,2} \\
+  n_{2,2} \\
+  n_{3,2} \\
+  n_{4,2} \\ 
+  n_{1,3} \\
+  n_{2,3} \\
+  n_{3,3} \\
+  n_{4,3} \\ 
+  n_{1,4} \\
+  n_{2,4} \\
+  n_{3,4} \\
+  n_{4,4} \\ 
+  n_{1,5} \\
+  n_{2,5} \\
+  n_{3,5} \\
+  n_{4,5} \\
+  n_{1,6} \\
+  n_{2,6} \\
+  n_{3,6} \\
+  n_{4,6}
+  \end{pmatrix};\ 
+\text{vec}(\mathbf{N}^\top) = \begin{bmatrix}
+  n_{1,1} \\ 
+  n_{1,2} \\ 
+  n_{1,3} \\ 
+  n_{1,4} \\
+  n_{1,5} \\
+  n_{1,6} \\
+  n_{2,1} \\
+  n_{2,2} \\
+  n_{2,3} \\ 
+  n_{2,4} \\
+  n_{2,5} \\
+  n_{2,6} \\
+  n_{3,1} \\
+  n_{3,2} \\ 
+  n_{3,3} \\
+  n_{3,4} \\
+  n_{3,5} \\
+  n_{3,6} \\
+  n_{4,1} \\
+  n_{4,2} \\ 
+  n_{4,3} \\
+  n_{4,4} \\
+  n_{4,5} \\
+  n_{4,6}
+  \end{bmatrix}
+$$
+
+while the vec-permutation matrix $\mathbf{P}$ has dimension $s,h \times s,h$, given by:
+
+$$
+\mathbf{P}(s, h) = \sum_{s = 1}^{S} \sum_{h = 1}^H \mathbf{E}_{s,h} \otimes \mathbf{E}_{s,h}^\top
+$$
+
+The matrix $\mathbf{E}$ has dimensions $s \times h$, with a 1 in the $s,h$ position and zeros elsewhere. The $\otimes$ is the Kronecker matrix product (If $\mathbf{A}$ is an $m \times n$ matrix and $\mathbf{B}$ is a $p \times q$ matrix, then the Kronecker product $\mathbf{A} \otimes \mathbf{B}$ is the $pm \times qn$ block matrix, [see](https://en.wikipedia.org/wiki/Kronecker_product)).
+
+Let see a potential example of $\mathbf{E}$ and the Kronecker product, when $s = 1$ and $h = 2$:
+
+$$
+\mathbf{E} = \begin{pmatrix}
+        0 & 1 & 0 & 0 & 0 & 0\\ 
+        0 & 0 & 0 & 0 & 0 & 0\\ 
+        0 & 0 & 0 & 0 & 0 & 0\\ 
+        0 & 0 & 0 & 0 & 0 & 0
+\end{pmatrix} ;\ \mathbf{E}^\top = \begin{pmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{pmatrix} \\
+\mathbf{E} \otimes \mathbf{E}^\top = \begin{pmatrix}
+  0\mathbf{E}^\top & 1 \times \mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top \\ 
+  0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top \\ 
+  0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top \\ 
+  0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top & 0\mathbf{E}^\top 
+  \end{pmatrix} 
+$$  
+
+Or: 
+$$  
+  \begin{bmatrix} 
+        0\begin{bmatrix}
+          0 & 0 & 0 & 0 \\ 
+          1 & 0 & 0 & 0 \\ 
+          0 & 0 & 0 & 0 \\ 
+          0 & 0 & 0 & 0 \\ 
+          0 & 0 & 0 & 0 \\ 
+          0 & 0 & 0 & 0
+  \end{bmatrix} & \mathbf{(}1\mathbf{)} \begin{bmatrix}
+                  0 & 0 & 0 & 0 \\ 
+                  \mathbf{(}1\mathbf{)} & 0 & 0 & 0 \\ 
+                  0 & 0 & 0 & 0 \\ 
+                  0 & 0 & 0 & 0 \\ 
+                  0 & 0 & 0 & 0 \\ 
+                  0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} \\ 
+            0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} \\ 
+            0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} \\ 
+            0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} & 0\begin{bmatrix}
+        0 & 0 & 0 & 0 \\ 
+        1 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0 \\ 
+        0 & 0 & 0 & 0
+\end{bmatrix} 
+                  \end{bmatrix}
+$$
+
+(the parentheses locate the unique operation that result in something)
+
+Resulting in 
+
+$$
+\mathbf{P} = \begin{pmatrix}
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & \mathbf{(}1\mathbf{)} & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & \\
+\end{pmatrix}
+$$
+
+And then, iterate the positions. We can use a code to reproduce this, but with smaller stages and patches for representative purposes:
+
+```{r}
+S <- 2 # two stages (J-A)
+H <- 2 # two patches (N-S)
+
+P <- matrix(0, S*H, S*H)
+P
+for (s in 1:S){
+  for (h in 1:H){
+    print(paste0("Stage: ",s)); print(paste0("Patch: ", h))
+    E <- matrix(0,S,H)
+    E[s,h] <- 1
+    P <- P + kronecker(E,t(E))   
+    print(paste0("E matrix for stage ", s, " and patch ", h))
+    print(E)
+    print(paste0("Cummulative sum of Matrix P for stage ", s, " and patch ", h))
+    print(P)
+  }
+}
+P
+```
+
+This is our ending $\mathbf{P}$. The trick of this permutation matrix is that it will "help" the projection matrix to first apply the block-demography matrix $\mathbb{B}$ to the population vector organized by patches:
+
+$$
+\text{vec}(\mathbf{N}) = \begin{pmatrix}
+  n_{1,1} \\ 
+  n_{2,1} \\ 
+  n_{1,2} \\
+  n_{2,2}
+  \end{pmatrix},
+$$
+then permute the result to reorganize the population vector by stages:
+$$
+\text{vec}(\mathbf{N}^\top) = \begin{bmatrix}
+  n_{1,1} \\ 
+  n_{1,2} \\ 
+  n_{2,1} \\
+  n_{2,2}
+  \end{bmatrix},
+$$
+applies the block dispersal matrix $\mathbb{M}$, and then permutes the result back to the original organization of the population by patches ($\text{vec}(\mathbf{N})$).
+
+## Projection matrix with population arrangement by patches under dempography then dispersal
+
+Here we need some biological information of our species, but [Hunter & Caswell (2005)](https://doi.org/10.1016/j.ecolmodel.2005.05.002)) mentioned that the four combinations (of arrangement by patches or stages and sequences of demography then dispersal or dispersal then demography) can be obtained by any other, and that their eigenvalue spectra are identical (we can estimate $\lambda$). Let's use the first case, population vector arrangement by patches with demography and then dispersal (Miguel's mentioned this biological grounded decision was taken back in his days as a graduate student with Brian Reichert). 
+
+$$
+\begin{pmatrix} 
+        \mathbf{n}_1 \\
+        \vdots \\
+        \mathbf{n}_H
+\end{pmatrix} (t+1) = \mathbf{P}^\top \mathbb{M} \mathbf{P} \mathbb{B} \begin{pmatrix} 
+        \mathbf{n}_1 \\
+        \vdots \\
+        \mathbf{n}_H
+\end{pmatrix} (t)
+$$
+
+So, the projection matrix $\textbf{A}$ of $\mathbf{n}(t+1) = \mathbf{A}\mathbf{n}(t)$ becomes $A = \mathbf{P}^\top \mathbb{M} \mathbf{P} \mathbb{B}$. Recall $\mathbb{B}$ is the block-demography matrix to project the population vector organized by patches and $\mathbb{M}$ the block-dispersal matrix to project the population vector organized by stages. 
+
+# Snail kite project data
+
+We can estimate survival, breeding, and dispersal from the monitoring of snail kites in Florida. We can use a Bayesian inference framework to run our CMR model (see a great resource inspiration [here](https://oliviergimenez.github.io/hmm-cr-nimble-isec2022-workshop/)). 
+
+## Capture-Mark-Recapture model for survival, stage transition, and detection probabilities
+
+My indices:
+$$
+k = 1, \dots, K \text{ individuals (kites)} \\
+t = 1, \dots, T \text{ years (primary periods, }times) \\ 
+s = 1, \dots, S \text{ = 4 stages (1: 0-1 yr, 2: 1-2 yrs, 3: 2-12 yrs, 4: ≥13 yrs)} \\
+h = 1, \dots, H \text{ = 2 states for now (N vs S), but could be 6 patches (}homes,\ habitats,\ humedales)
+$$
+
+I am not including $r = 1, \dots, R \text{ = 6 surveys within year (secondary periods, }replicates)$ for now, because the survival is estimated by stage-patch levels (but this could be cool to do it for Superpopulation estimation including temporary emigration).
+
+Let's think in the simple ecological states for each patch (north or south):
+
+* Young of the year of 0 to 1 year ($1$)
+* Juvenile or Young adult of 1 to 2 years ($2$)
+* Adult of more than 2 years but less than 13 ($3$)
+* Old adult of more than 12 years ($4$)
+* Dead ($5$)
+
+Therefore, the transition state matrix (without dispersal) for a patch could be represented as:
+
+$$
+\mathbf{\Gamma}_h = 
+  \begin{bmatrix}
+    0 & \phi_{1} & 0 & 0 & 1-\phi_{1} \\
+    0 & 0 & \phi_{2} & 0 & 1-\phi_{2} \\
+    0 & 0 & \phi_3 (1 - \psi_{3\rightarrow4}) & \phi_3 \psi_{3\rightarrow4} & 1-\phi_3 \\
+    0 & 0 & 0 & \phi_4 & 1-\phi_4 \\
+    0 & 0 & 0 & 0 & 1
+    \end{bmatrix}_h \ 
+    \begin{matrix} 
+      z_{t-1} = \text{Young of the year of 0 to 1 year} = 1 \\
+      z_{t-1} = \text{Juvenile or Young adult of 1 to 2 years} = 2 \\
+      z_{t-1} = \text{Adult of 2 to 12 years} = 3 \\
+      z_{t-1} = \text{Old adults of >12 years} = 4 \\
+      z_{t-1} = \text{Dead} = 5
+    \end{matrix} 
+$$
+
+Rows present the latent state $z_{t-1}$, while columns the next time state $z_{t}$. Note that surviving as a young of the year means to "transition" to a juvenile or young adult of 1-2 years, and surviving in this stage 2 means "transition" to stage 3. However, individuals can survive in stage 3 and not transition to stage 4 if they are still between 2-11 years
+
+From these states, we can assume that detection probability varies by patch (wetland type; north wetlands might have higher detection probability as lacustrine vs lower detection probability in the south as palustrine [Beatty et al. 2025](https://esajournals.onlinelibrary.wiley.com/doi/10.1002/ecy.70242)) and by age, so the observation matrix for a patch is: 
+$$
+\mathbf{\Omega}_h = \begin{bmatrix}
+    1-p_1 & p_1 & 0 & 0 & 0 \\
+    1-p_2 & 0 & p_2 & 0 & 0 \\
+    1-p_3 & 0 & 0 & p_3 & 0 \\
+    1-p_4 & 0 & 0 & 0 & p_4 \\
+    1 & 0 & 0 & 0 & 0 
+    \end{bmatrix}_h    
+    \begin{matrix} 
+      z_{t} = \text{Young of the year of 0 to 1 years} = 1 \\
+      z_{t} = \text{Juvenile or Young adult of 1 to 2 years} = 2 \\
+      z_{t} = \text{Adult of 2 to 12 years} = 3 \\
+      z_{t} = \text{Old adult of >12 years} = 4 \\
+      z_{t} = \text{Dead} = 5
+    \end{matrix} 
+$$
+where column 1 corresponds to not detected, and the others as detected in each state, respectively.
+
+We can adjust the data from the snail kite new database to have the observation matrix with age classes 1, 2, 3, 4. 
+
+```{r}
+#Call the downloaded data using Andrew's helpers
+# But using a wrapper code to knit
+# Read the helper file text directly
+helpers_text <- readLines(here::here("skutils/load_helpers.R"), warn = FALSE)
+
+# Detect if the problematic line exists and comment it out dynamically in memory
+# (This does NOT touch or modify your actual file on disk)
+helpers_text_fixed <- gsub("sys\\.frame\\(1\\)\\$ofile", "here::here('skutils/load_helpers.R')", helpers_text)
+
+# Evaluate the safe code directly into your Markdown environment
+eval(parse(text = helpers_text_fixed), envir = .GlobalEnv)
+
+library(tidyverse)
+
+resights <- read_sk_export("resights", dir = here::here("data"))
+survey_efforts <- read_sk_export("survey_efforts", dir = here::here("data"))
+surveys <- read_sk_export("surveys", dir = here::here("data"))
+bands <- read_sk_export("bands", dir = here::here("data")) |>
+  filter(color != "USFWS",
+         color != "Unknown") |>
+  mutate(leg = ifelse(leg == "right", "R", "L"), 
+         direction = case_when(direction == "horizontal" ~ "H",
+                               direction == "rotated" ~ "R",
+                               direction == "straight" ~ "S",
+                               direction == "vertical" ~ "V",
+                               TRUE ~ direction),
+         unique.id = paste(leg, color, code, direction, sep = "_"))
+birds <- read_sk_export("birds", dir = here::here("data"))
+
+# organize the data and add survey ID to 2003 surveys base on dates
+
+data_snki <- resights |> 
+  left_join(survey_efforts, join_by(survey_effort_id)) %>%
+  left_join(surveys, join_by(survey_id)) |> 
+  # assign survey_code by date from Meghan_tallies
+  mutate(survey_code = case_when(date <= "2003-03-16" & year == 2003 ~ "1",
+                                 date <= "2003-04-07" & year == 2003 ~ "2",
+                                 date <= "2003-04-27" & year == 2003 ~ "3",
+                                 date <= "2003-05-28" & year == 2003 ~ "4",
+                                 TRUE ~ survey_code)) |>
+  #count(year, survey_code)
+  filter(!is.na(bird_id), 
+         survey_code %in% c(as.character(1:6))) |>
+  #count(year, survey_code)
+  #count(area.x)
+  mutate(region = case_when(area.x == "A-1 FEB" ~ "EVER",
+                            area.x == "A2-STA" ~ "EVER",
+                            area.x == "Big Cypress National Preserve" ~ "EVER",
+                            area.x == "C-23 Reservoir" ~ "EAST",
+                            area.x == "C-43 Reservoir" ~ "N", # To me, this is OKEE (W discharges)
+                            area.x == "C-44 Impoundment" ~ "EAST",
+                            area.x == "Lake Marian" ~ "KRV",
+                            area.x == "Lake Kissimmee" ~ "KRV",
+                            area.x == "Lake Tohopekaliga" ~ "KRV",
+                            area.x == "SJM" ~ "SJM",
+                            area.x == "Loxahatchee Slough" ~ "EAST",
+                            area.x == "Del Webb" ~ "N", # no idea where is this
+                            area.x == "Kissimmee Restoration Area" ~ "KRV",
+                            area.x == "Lake Okeechobee" ~ "OKEE",
+                            area.x == "Harns Marsh" ~ "N", # To me, this is OKEE (W discharges)
+                            area.x == "Lake Istokpoga" ~ "KRV",
+                            area.x == "East Lake Tohopekaliga" ~ "KRV",
+                            area.x == "WCA2B" ~ "EVER",
+                            area.x == "Lake Parker" ~ "KRV",
+                            area.x == "Powell Creek Preserve" ~ "N", # To me, this is OKEE (W discharges)
+                            area.x == "Lake Jackson" ~ "KRV",
+                            area.x == "Lake Cypress" ~ "KRV",
+                            area.x == "Lake Hatchineha" ~ "KRV",
+                            area.x == "Nubbins Slough STA" ~ "N", # To me, this is OKEE (W discharges)
+                            area.x == "Paynes Prairie" ~ "PP", 
+                            area.x == "Lake Hicpochee Impoundments" ~ "OKEE",
+                            area.x == "Withlacoochee River" ~ "N", # To me, this is NORTH (with PP)
+                            area.x == "WCA3A" ~ "EVER",
+                            area.x == "Lakeside Ranch STA" ~ "OKEE",
+                            area.x == "Everglades National Park" ~ "EVER",
+                            area.x == "Hungryland WEA" ~ "EAST",
+                            area.x == "Grassy Waters Preserve" ~ "EAST",
+                            area.x == "Loxahatchee National Wildlife Refuge" ~ "EVER",
+                            area.x == "STA 1" ~ "EVER",
+                            area.x == "Big Cypress National Preserve" ~ "EVER",
+                            area.x == "STA 5/6" ~ "EVER",
+                            area.x == "Rotenberger WMA" ~ "EVER",
+                            area.x == "Mary A. Mitigation Bank" ~ "SJM",
+                            area.x == "Lake Runnymede" ~ "KRV",
+                            area.x == "STA 2" ~ "EVER",
+                            area.x == "WCA3B" ~ "EVER",
+                            area.x == "Combined Lake Kissimmee Tiger Lake" ~ "KRV",
+                            area.x == "WCA2A" ~ "EVER",
+                            area.x == "STA 3/4" ~ "EVER",
+                            area.x == "Lake Tarpon" ~ "N", # To me, this is NORTH (with PP)
+                            TRUE ~ area.x),
+         month = month(date)) |>
+  filter(year %in% c(2006:2026))
+
+# 2023 has no resights in the south, so it migh be convinient to "force" the full set of data
+all_years <- paste0("year_", 2006:2026)
+
+# include individual information and assign the states
+resights_raw_dem_S <- data_snki |> 
+    left_join(bands) |>
+    left_join(birds) |>
+    mutate(age_num = (year - birth_year)) |>
+    dplyr::select(c(date, survey_code, area.x, breeding_status, unique.id, year, month, region,
+                    age_num, age_class, birth_year)) |>
+    filter(age_num >= 0, # 27 age are negative, remove them
+           region %in% c("EVER", "EAST")) |> 
+    mutate(
+      state = case_when(age_num <= 1 ~ 1,
+                        age_num > 1 ~ 2,
+                        TRUE ~ age_num),
+      age_class_assumed = case_when(age_num >= 13 ~ 4,
+                                       age_num < 13 & age_num >= 2 ~ 3,
+                                       age_num < 2 & age_num >= 1 ~ 2,
+                                       age_num < 1 ~ 1,
+                                       TRUE ~ age_num), 
+      t = paste0("year_", year),
+      t = factor(t, levels = all_years))
+# check results
+table(resights_raw_dem_S$region, resights_raw_dem_S$age_class_assumed)
+table(resights_raw_dem_S$age_num, resights_raw_dem_S$age_class_assumed)
+
+# age class
+years_df <- tibble(
+  year = 2006:2026,
+  t = paste0("year_", year)
+)
+
+# each individual will have the age class progression (NA -> 1 -> 2 -> 3 -> 3 -> ... -> 4 -> 4 -> ...)
+age.class.s <- resights_raw_dem_S |>
+  distinct(unique.id, birth_year) |>
+  crossing(years_df) |>
+  mutate(
+    age_num = year - birth_year,
+    age_class_assumed = case_when(
+      age_num < 0 ~ NA_real_,      # before birth are NA, but to avoid problems with NIMBLE, we leaf pre-birth as 1
+      age_num < 1 ~ 1,
+      age_num < 2 ~ 2,
+      age_num < 13 ~ 3,
+      TRUE ~ 4
+    )
+  ) |>
+  select(unique.id, t, age_class_assumed) |>
+  pivot_wider(
+    names_from = t,
+    values_from = age_class_assumed,
+    names_expand = TRUE
+  )
+
+# Data encounter (0 = not detected, 1 = detected), using the same order of band code (unique.id)
+y_s <- resights_raw_dem_S |>
+  distinct(unique.id, age_class_assumed, t) |>
+  arrange(t) |>
+  pivot_wider(
+    names_from = t,
+    values_from = age_class_assumed,
+    names_expand = TRUE
+  ) |>
+  arrange(match(unique.id, age.class.s$unique.id))
+
+y.age.s <- y_s
+
+y.age.s[is.na(y.age.s)] <- 0
+
+y.age.s <- as.matrix(y.age.s[-1])
+
+```
+
+Get occasion of first recapture
+
+```{r}
+get.first <- function(x) min(which(x != 0))
+
+first_s <- apply(y.age.s, 1, get.first)
+first_s
+```
+
+This state-space structure looks in `NIMBLE` as:
+
+```{r eval=FALSE}
+library(nimble)
+library(MCMCvis)
+
+simple_cjs <- nimbleCode({
+  # -------------------------------------------------
+  # Age classes:
+  # 1: Young of year (0-1 yr)
+  # 2: Juvenile / Young adult (1-2 yr)
+  # 3: Adult (2-12 yr)
+  # 4: Old adult (>= 13 yr)
+  # -------------------------------------------------
+  # Parameters:
+  # phi1: survival probability stage 1
+  # phi2: survival probability stage 2
+  # phi3: survival probability stage 3
+  # phi4: survival probability stage 4
+  # psi34: transition probability from stage 3 to stage 4
+  # p1: recapture probability stage 1
+  # p2: recapture probability stage 2
+  # p3: recapture probability stage 3
+  # p4: recapture probability stage 4
+  # -------------------------------------------------
+  # States (z):
+  # 1 alive at stage 1
+  # 2 alive at stage 2
+  # 3 alive at stage 3
+  # 4 alive at stage 4
+  # 5 dead
+  # -------------------------------------------------
+  # Observations (y):  
+  # 1 not detected
+  # 2 detected as 1
+  # 3 detected as 2
+  # 4 detected as 3
+  # 5 detected as 4
+  # -------------------------------------------------
+  
+  # priors
+  phi1 ~ dunif(0, 1)
+  phi2 ~ dunif(0, 1)
+  phi3 ~ dunif(0, 1)
+  phi4 ~ dunif(0, 1)
+  p1 ~ dunif(0, 1)
+  p2 ~ dunif(0, 1)
+  p3 ~ dunif(0, 1)
+  p4 ~ dunif(0, 1)
+  psi34 ~ dunif(0, 1)
+
+  # probabilities of state z(t+1) given z(t)
+  gamma[1,1] <- 0
+  gamma[1,2] <- phi1
+  gamma[1,3] <- 0
+  gamma[1,4] <- 0
+  gamma[1,5] <- 1 - phi1
+  gamma[2,1] <- 0
+  gamma[2,2] <- 0
+  gamma[2,3] <- phi2
+  gamma[2,4] <- 0
+  gamma[2,5] <- 1 - phi2
+  gamma[3,1] <- 0
+  gamma[3,2] <- 0
+  gamma[3,3] <- phi3 * (1 - psi34)
+  gamma[3,4] <- phi3 * psi34
+  gamma[3,5] <- 1 - phi3
+  gamma[4,1] <- 0
+  gamma[4,2] <- 0
+  gamma[4,3] <- 0
+  gamma[4,4] <- phi4
+  gamma[4,5] <- 1 - phi4
+  gamma[5,1] <- 0
+  gamma[5,2] <- 0
+  gamma[5,3] <- 0
+  gamma[5,4] <- 0
+  gamma[5,5] <- 1
+  
+  # probabilities of y(t) given z(t)
+  omega[1,1] <- 1 - p1     # Pr(alive 1 t -> non-detected t)
+  omega[1,2] <- p1         # Pr(alive 1 t -> detected 1 t)
+  omega[1,3] <- 0          # Pr(alive 1 t -> detected 2 t)
+  omega[1,4] <- 0          # Pr(alive 1 t -> detected 3 t)
+  omega[1,5] <- 0          # Pr(alive 1 t -> detected 4 t)
+  omega[2,1] <- 1 - p2     # Pr(alive 2 t -> non-detected t)
+  omega[2,2] <- 0          # Pr(alive 2 t -> detected 1 t)
+  omega[2,3] <- p2         # Pr(alive 2 t -> detected 2 t)
+  omega[2,4] <- 0          # Pr(alive 2 t -> detected 3 t)
+  omega[2,5] <- 0          # Pr(alive 2 t -> detected 4 t)
+  omega[3,1] <- 1 - p3     # Pr(alive 3 t -> non-detected t)
+  omega[3,2] <- 0          # Pr(alive 3 t -> detected 1 t)
+  omega[3,3] <- 0          # Pr(alive 3 t -> detected 2 t)
+  omega[3,4] <- p3         # Pr(alive 3 t -> detected 3 t)
+  omega[3,5] <- 0          # Pr(alive 3 t -> detected 4 t)
+  omega[4,1] <- 1 - p4     # Pr(alive 4 t -> non-detected t)
+  omega[4,2] <- 0          # Pr(alive 4 t -> detected 1 t)
+  omega[4,3] <- 0          # Pr(alive 4 t -> detected 2 t)
+  omega[4,4] <- 0          # Pr(alive 4 t -> detected 3 t)
+  omega[4,5] <- p4         # Pr(alive 4 t -> detected 4 t)
+  omega[5,1] <- 1          # Pr(dead t -> non-detected t)
+  omega[5,2] <- 0          # Pr(dead t -> detected 1 t)
+  omega[5,3] <- 0          # Pr(dead t -> detected 2 t)
+  omega[5,4] <- 0          # Pr(dead t -> detected 3 t)
+  omega[5,5] <- 0          # Pr(dead t -> detected 4 t)
+  
+  # likelihood 
+  for (k in 1:Kites){
+    # latent state at first capture
+    z[k, first[k]] <- y[k, first[k]] - 1
+    for (t in (first[k]+1):Time){
+      # z(t) given z(t-1)
+      z[k,t] ~ dcat(gamma[z[k,t-1], 1:5])
+      # y(t) given z(t)
+      y[k,t] ~ dcat(omega[z[k,t], 1:5])
+    }
+  }
+})
+
+```
+
+
+Data in list, adding 1 (so no detection 0 becomes 1, detection as juvenile 1 becomes 2, and detection as adult becomes 3 - `NIMBLE` categories does not like 0s).
+
+```{r}
+my.data.s <- list(y = y.age.s + 1)
+```
+
+Constants also as a list
+
+```{r}
+my.constants.s <- list(first = first_s,
+                       Time = ncol(y.age.s),
+                       Kites = nrow(y.age.s))
+```
+
+Initial values
+
+```{r}
+zinits.s <- as.matrix(age.class.s[-1])
+
+zinits.s[is.na(zinits.s)] <- 0
+
+initial.values.s <- function(){list(phi1 = runif(1, 0, 1), 
+                                  phi2 = runif(1, 0, 1), 
+                                  phi3 = runif(1, 0, 1), 
+                                  phi4 = runif(1, 0, 1), 
+                                  psi34 = runif(1, 0, 1),
+                                  p1 = runif(1, 0, 1), 
+                                  p2 = runif(1, 0, 1), 
+                                  p3 = runif(1, 0, 1),
+                                  p4 = runif(1, 0, 1),
+                                  z = zinits.s)}
+```
+
+The parameters to monitor
+
+```{r}
+parameters.to.save.cjs <- c("phi1", "phi2", "phi3", "phi4",
+                              "psi34", 
+                              "p1", "p2", "p3", "p4")
+parameters.to.save.cjs
+```
+
+MCMC settings
+```{r}
+n.iter <- 10000
+n.burnin <- 5000
+n.chains <- 2
+```
+
+Run nimble.
+```{r eval = FALSE}
+mcmc.simple.cjs.s <- nimbleMCMC(code = simple_cjs, 
+                             constants = my.constants.s,
+                             data = my.data.s,              
+                             inits = initial.values.s(),
+                             monitors = parameters.to.save.cjs,
+                             niter = n.iter,
+                             nburnin = n.burnin, 
+                             nchains = n.chains, 
+                             WAIC = TRUE)
+saveRDS(mcmc.simple.cjs.s, "data/mcmc_CJS_south_2006_2026.RDS")
+```
+
+```{r}
+library(nimble)
+library(MCMCvis)
+
+mcmc.simple.cjs.s <- readRDS("data/mcmc_CJS_south_2006_2026.RDS")
+MCMCsummary(mcmc.simple.cjs.s$samples, round = 3)
+MCMCplot(mcmc.simple.cjs.s$samples, main = "South")
+```
+
+Note that the probability of survival and stay in stage 3 is $Q_3 = \hat{\phi}_3 \times (1 - \hat{\psi}_{3 \rightarrow 4}) = 0.7144$, while the probability of survive and become >12 years (stage 4) is very low ($G_3 = \hat{\phi}_3 \times \hat{\psi}_{3 \rightarrow 4} = 0.0456$). I am including the `WAIC = TRUE` statement, so we can compare this simple model with other more complicated models (e.g., time dependent transition $\psi_{3 \rightarrow 4}$, detection $p$ or survival $\phi$). But our interest for now is estimate $\mathbf{B}_h$, being $h = 1, 2$, where $h = 1$ is South and $h = 2$ is North. So, we can repeat this approach for the northern region:
+
+```{r}
+# include individual information and assign the states
+resights_raw_dem_N <- data_snki |> 
+    left_join(bands) |>
+    left_join(birds) |>
+    mutate(age_num = (year - birth_year)) |>
+    dplyr::select(c(date, survey_code, area.x, breeding_status, unique.id, year, month, region,
+                    age_num, age_class, birth_year)) |>
+    filter(age_num >= 0, # 27 age are negative, remove them
+           region %in% c("SJM", "PP", "OKEE", "KRV", "N")) |> 
+    mutate(
+      state = case_when(age_num <= 1 ~ 1,
+                        age_num > 1 ~ 2,
+                        TRUE ~ age_num),
+      age_class_assumed = case_when(age_num >= 13 ~ 4,
+                                       age_num < 13 & age_num >= 2 ~ 3,
+                                       age_num < 2 & age_num >= 1 ~ 2,
+                                       age_num < 1 ~ 1,
+                                       TRUE ~ age_num), 
+      t = paste0("year_", year),
+      t = factor(t, levels = all_years))
+# check results
+table(resights_raw_dem_N$region, resights_raw_dem_N$age_class_assumed)
+table(resights_raw_dem_N$age_num, resights_raw_dem_N$age_class_assumed)
+
+# each individual will have the age class progression (NA -> 1 -> 2 -> 3 -> 3 -> ... -> 4 -> 4 -> ...)
+age.class.n <- resights_raw_dem_N |>
+  distinct(unique.id, birth_year) |>
+  crossing(years_df) |>
+  mutate(
+    age_num = year - birth_year,
+    age_class_assumed = case_when(
+      age_num < 0 ~ NA_real_,      # before birth are NA, but to avoid problems with NIMBLE, we leaf pre-birth as 1
+      age_num < 1 ~ 1,
+      age_num < 2 ~ 2,
+      age_num < 13 ~ 3,
+      TRUE ~ 4
+    )
+  ) |>
+  select(unique.id, t, age_class_assumed) |>
+  pivot_wider(
+    names_from = t,
+    values_from = age_class_assumed,
+    names_expand = TRUE
+  )
+
+# Data encounter (0 = not detected, 1 = detected), using the same order of band code (unique.id)
+y_n <- resights_raw_dem_N |>
+  distinct(unique.id, age_class_assumed, t) |>
+  arrange(t) |>
+  pivot_wider(
+    names_from = t,
+    values_from = age_class_assumed,
+    names_expand = TRUE
+  ) |>
+  arrange(match(unique.id, age.class.n$unique.id))
+
+y.age.n <- y_n
+y.age.n[is.na(y.age.n)] <- 0
+y.age.n <- as.matrix(y.age.n[-1])
+
+first_n <- apply(y.age.n, 1, get.first)
+first_n
+
+my.data.n <- list(y = y.age.n + 1)
+my.constants.n <- list(first = first_n,
+                       Time = ncol(y.age.n),
+                       Kites = nrow(y.age.n))
+zinits.n <- as.matrix(age.class.n[-1])
+
+zinits.n[is.na(zinits.n)] <- 0
+
+initial.values.n <- function(){list(phi1 = runif(1, 0, 1), 
+                                  phi2 = runif(1, 0, 1), 
+                                  phi3 = runif(1, 0, 1), 
+                                  phi4 = runif(1, 0, 1), 
+                                  psi34 = runif(1, 0, 1),
+                                  p1 = runif(1, 0, 1), 
+                                  p2 = runif(1, 0, 1), 
+                                  p3 = runif(1, 0, 1),
+                                  p4 = runif(1, 0, 1),
+                                  z = zinits.n)}
+```
+
+Run nimble.
+```{r eval = FALSE}
+mcmc.simple.cjs.n <- nimbleMCMC(code = simple_cjs, 
+                             constants = my.constants.n,
+                             data = my.data.n,              
+                             inits = initial.values.n(),
+                             monitors = parameters.to.save.cjs,
+                             niter = n.iter,
+                             nburnin = n.burnin, 
+                             nchains = n.chains, 
+                             WAIC = TRUE)
+saveRDS(mcmc.simple.cjs.n, "data/mcmc_CJS_north_2006_2026.RDS")
+```
+
+```{r}
+mcmc.simple.cjs.n <- readRDS("data/mcmc_CJS_north_2006_2026.RDS")
+MCMCsummary(mcmc.simple.cjs.n$samples, round = 3)
+MCMCplot(mcmc.simple.cjs.n$samples, main = "North")
+```
+
+Compare the estimates of detection probability for individuals >1 year between north and south. Northern individuals have higher detection probability, because most of the wetlands are lacustrine (see [Beatty et al. 2025](https://esajournals.onlinelibrary.wiley.com/doi/10.1002/ecy.70242)).
+
+$\mathbb{B}$ is so far
+
+$$
+\mathbb{B} = \begin{pmatrix}
+      \mathbf{B}_1 = \begin{bmatrix} 
+      0 & F_2 & F_3 & F_4 \\
+      0.47 & 0 & 0 & 0  \\
+      0 & 0.69 & 0.76 (1 - 0.06) & 0 \\
+      0 & 0 & 0.76 (0.06) & 0.75 \\
+      \end{bmatrix}_1 & 0  \\
+      0 & \mathbf{B}_2 = \begin{bmatrix} 
+      0 & F_2 & F_3 & F_4 \\
+      0.61 & 0 & 0 & 0  \\
+      0 & 0.79 & 0.83 (1 - 0.02) & 0 \\
+      0 & 0 &  0.83 (0.02) & 0.69\\
+      \end{bmatrix}_2
+\end{pmatrix}
+$$
+
+However, to include the fecundity, we can split the Breeders and No Breeders of each stage (2 to 4) to get the fecundity vector ($F_2$ to $F_4$), which could be the product of annual survival $\hat{\phi}_s$ and the per capita fecundity rate. This per capita fecundity rate for each stage (2:4) is the product of breeding probability, nest attempt probability, nest success probability, and number of females hatched per year.
+
+## Per capita fecundity rate
+
+We need breeding probability, nest attempt probability, nest success probability, and number of females hatched per year
+
+### Breeding probability
+
+```{r}
+table(resights_raw_dem_S$breeding_status, resights_raw_dem_S$age_class_assumed)
+table(resights_raw_dem_N$breeding_status, resights_raw_dem_N$age_class_assumed)
+```
+
+We can assume that stage 1 does not reproduce, while since stage 2 (1-2 years) can. Also, to be conservative, the "Unknown" classification in the data is assumed to "no breeding", and "Courtship" (at the correct age) is "Breeding". In previous PVA, the breeding probability use the raw proportions of individually marked snail kites exhibiting breeding behaviors during standardized surveys (using surveys 1-6, March - June, in the monitoring program) with the estimated average detection probability for breeding behavior taken from Reichert et al. (2012).
+
+Let $\pi_t$ be the annual breeding probability, $n_{\text{breed},t}$ the number of marked individuals exhibiting breeding behavior in year $t$, $n_{\text{obs},t}$ the total number of marked individuals recorded in time $t$, and $p_{b} = 0.37$ the detection probability of breeding behavior from Reichert et al. (2012). Raw observed proportion is as simple as:
+$$
+\pi_{\text{obs},t} = \frac{n_{\text{breed},t}}{n_{\text{obs},t}}
+$$
+
+But breeding behavior is detected with the reused probability $p_b$, so $\pi_{\text{obs},t} = \pi_t p_b$, and solving for $\pi_t$, we end with $\hat{\pi}_t = \frac{\pi_{\text{obs},t}}{p_b} = \frac{n_{\text{breed},t}}{p_b \times n_{\text{obs},t}}$. However, if more than the $37 \%$ of the marked individuals are breeding, $\pi_t$ can end in values above 1. To avoid this, we can either formulate that the number of marked individuals exhibiting breeding behavior is drawn from a Binomial distribution $n_{\text{breed},t} \sim \text{Binomial}(n_{\text{obs},t}, \pi_t p_b)$, fixing $p_b = 0.37$ and estimating $\pi_t$, or we can simply use a constrained MLE of the $\hat{\pi}$ between 0 and 1. Then, the single annual breeding probability to compute per capita fecundity rate is $\bar{\pi} = \frac{1}{T} \sum_{t = 1}^T \pi_t$
+
+```{r}
+breeding.p.s <- resights_raw_dem_S |>
+  mutate(breeding = case_when(age_class_assumed == 1 ~ 0,
+                              age_class_assumed %in% c(2:4) & breeding_status %in% c("Breeding", "Courtship") ~ 1,
+                              TRUE ~ 0)) |>
+  group_by(t, age_class_assumed) |>
+  summarize(n_obs = n_distinct(unique.id),
+            n_breed = n_distinct(unique.id[breeding == 1]),
+            .groups = "drop") |>
+  mutate(pi_obs = n_breed / n_obs,
+         pi_hat = pmin(1, pi_obs / 0.37)) |>
+  group_by(age_class_assumed) |>
+  summarise(pi_hat_s = mean(pi_hat), 
+            pi_lwr = quantile(pi_hat, 0.25),
+            pi_med = quantile(pi_hat, 0.5),
+            pi_upr = quantile(pi_hat, 0.75))
+breeding.p.s
+
+breeding.p.n <- resights_raw_dem_N |>
+  mutate(breeding = case_when(age_class_assumed == 1 ~ 0,
+                              age_class_assumed %in% c(2:4) & breeding_status %in% c("Breeding", "Courtship") ~ 1,
+                              TRUE ~ 0)) |>
+  group_by(t, age_class_assumed) |>
+  summarize(n_obs = n_distinct(unique.id),
+            n_breed = n_distinct(unique.id[breeding == 1]),
+            .groups = "drop") |>
+  mutate(pi_obs = n_breed / n_obs,
+         pi_hat = pmin(1, pi_obs / 0.37)) |>
+  group_by(age_class_assumed) |>
+  summarise(pi_hat_s = mean(pi_hat), 
+            pi_lwr = quantile(pi_hat, 0.25),
+            pi_med = quantile(pi_hat, 0.5),
+            pi_upr = quantile(pi_hat, 0.75))
+breeding.p.n
+```
+
+### Nest attemp probability, nest success probability, and number of young females
+
+These reproductive parameters are estimated at the patch level
+
+```{r}
+nests <- read_sk_export("nests", dir = "data") |>
+  select(-c(comments))
+nest_surveys <- read_sk_export("nest_surveys", dir = "data")
+
+nest_status <- nest_surveys |> 
+  left_join(nests) |> #count(area)
+    mutate(region = case_when(area == "A-1 FEB" ~ "EVER",
+                              area == "A2-STA" ~ "EVER",
+                              area == "Big Cypress National Preserve" ~ "EVER",
+                              area == "C-23 Reservoir" ~ "EAST",
+                              area == "C-43 Reservoir" ~ "N", # To me, this is OKEE (W discharges)
+                              area == "C-44 Impoundment" ~ "EAST",
+                              area == "Lake Marian" ~ "KRV",
+                              area == "Lake Kissimmee" ~ "KRV",
+                              area == "Lake Tohopekaliga" ~ "KRV",
+                              area == "SJM" ~ "SJM",
+                              area == "Loxahatchee Slough" ~ "EAST",
+                              area == "Del Webb" ~ "N", # no idea where is this
+                              area == "Kissimmee Restoration Area" ~ "KRV",
+                              area == "Lake Okeechobee" ~ "OKEE",
+                              area == "Harns Marsh" ~ "N", # To me, this is OKEE (W discharges)
+                              area == "Lake Istokpoga" ~ "KRV",
+                              area == "East Lake Tohopekaliga" ~ "KRV",
+                              area == "WCA2B" ~ "EVER",
+                              area == "Lake Parker" ~ "KRV",
+                              area == "Powell Creek Preserve" ~ "N", # To me, this is OKEE (W discharges)
+                              area == "Lake Jackson" ~ "KRV",
+                              area == "Lake Cypress" ~ "KRV",
+                              area == "Lake Hatchineha" ~ "KRV",
+                              area == "Nubbins Slough STA" ~ "N", # To me, this is OKEE (W discharges)
+                              area == "Paynes Prairie" ~ "PP", 
+                              area == "Lake Hicpochee Impoundments" ~ "OKEE",
+                              area == "Withlacoochee River" ~ "N", # To me, this is NORTH (with PP)
+                              area == "WCA3A" ~ "EVER",
+                              area == "Lakeside Ranch STA" ~ "OKEE",
+                              area == "Everglades National Park" ~ "EVER",
+                              area == "Hungryland WEA" ~ "EAST",
+                              area == "Grassy Waters Preserve" ~ "EAST",
+                              area == "Loxahatchee National Wildlife Refuge" ~ "EVER",
+                              area == "STA 1" ~ "EVER",
+                              area == "Big Cypress National Preserve" ~ "EVER",
+                              area == "STA 5/6" ~ "EVER",
+                              area == "Rotenberger WMA" ~ "EVER",
+                              area == "Mary A. Mitigation Bank" ~ "SJM",
+                              area == "Lake Runnymede" ~ "KRV",
+                              area == "STA 2" ~ "EVER",
+                              area == "WCA3B" ~ "EVER",
+                              area == "Combined Lake Kissimmee Tiger Lake" ~ "KRV",
+                              area == "WCA2A" ~ "EVER",
+                              area == "STA 3/4" ~ "EVER",
+                              area == "Lake Tarpon" ~ "N", # To me, this is NORTH (with PP)
+                              TRUE ~ "N"), 
+           patch_h = case_when(region %in% c("EVER", "EAST") ~ 1,
+                               TRUE ~ 2)) |>
+  filter(year %in% c(2006:2026))
+
+table(nest_status$nest_status, nest_status$patch_h)
+```
+
+The previous report states "For the number of nesting attempts/breeder/year, we used individual resights of snail kites observed at nests within each year, adjusting for nest detection probabilities estimated by wetland type in Robertson et al. (2018)." However, resights does not include information of where the snail kite was observed... For now, I am not including this parameter in the fecundity estimation. 
+
+We can summarise the last status of each nest per year in patch $h$.
+```{r}
+nest_final <- nest_status |>
+  group_by(year, patch_h, nest_id) |>
+  summarise(
+    final_status = dplyr::last(na.omit(nest_status)),
+    max_young = max(young_count, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+And now we can estimate a nest success as $\tau_h = \frac{\text{Success}}{\text{Success + Failure}}$
+```{r}
+nest_success <- nest_final |>
+  filter(final_status %in% c("Successful", "Failed")) |>
+  group_by(year, patch_h) |>
+  summarise(
+    n_nests = n(),
+    n_success = sum(final_status == "Successful"),
+    p_success = n_success / n_nests,
+    .groups = "drop"
+  ) |>
+  group_by(patch_h) |>
+  summarise(nest_success = mean(p_success, na.rm = TRUE), .groups = "drop")
+nest_success
+```
+
+Assuming `young_count` at a successful nest is the number of fledged, and that the sex ratio at fledgling is 1:1
+```{r}
+fledge_fem <- nest_final |>
+  filter(final_status == "Successful") |>
+  group_by(year, patch_h) |>
+  summarise(
+    mean_young = mean(max_young, na.rm = TRUE),
+    female_young = mean_young * 0.5,
+    .groups = "drop"
+  ) |>
+  group_by(patch_h) |>
+  summarise(fem_young = mean(female_young, na.rm = TRUE), .groups = "drop")
+fledge_fem
+```
+
+### Computing fecundity vector
+
+So, fecundity in each stage $s$ in the south ($h=1$) and in the north ($h = 2$) are
+$$
+F_{s,h} = \pi_{s, h} \times \tau_h \times f_h \\
+F_{2,1} = 0.120 \times 0.650 \times 0.817 = 0.064 \\
+F_{2,2} = 0.310 \times 0.681 \times 1.020 = 0.215 \\
+
+F_{3,1} = 0.641 \times 0.650 \times 0.817 = 0.340 \\
+F_{3,2} = 0.831 \times 0.681 \times 1.020 = 0.577 \\
+
+F_{4,1} = 0.467 \times 0.650 \times 0.817 = 0.248 \\
+F_{4,2} = 0.840 \times 0.681 \times 1.020 = 0.583 \\
+
+$$
+
+These values came from:
+```{r}
+breeding.p.s
+breeding.p.n
+nest_success
+fledge_fem
+```
+
+## Block diagonal matrix for demography projection
+
+$\mathbb{B}$ therefore is:
+
+$$
+\mathbb{B} = \begin{pmatrix}
+      \mathbf{B}_1 = \begin{bmatrix} 
+      0 & 0.064 & 0.340 & 0.248 \\
+      0.474 & 0 & 0 & 0  \\
+      0 & 0.694 & 0.714 & 0 \\
+      0 & 0 & 0.046 & 0.748 \\
+      \end{bmatrix}_1 & 0  \\
+      0 & \mathbf{B}_2 = \begin{bmatrix} 
+      0 & 0.215 & 0.577 & 0.583 \\
+      0.607 & 0 & 0 & 0  \\
+      0 & 0.795 & 0.808 & 0 \\
+      0 & 0 &  0.020 & 0.686\\
+      \end{bmatrix}_2
+\end{pmatrix}
+$$
+
+## Dispersal of snail kites without demography
+
+$$
+\mathbb{M} = \begin{pmatrix}
+      \mathbf{M}_1 = \begin{bmatrix} 
+      m_{1,1} & m_{1,2} \\
+      m_{2,1} & m_{2,2}
+      \end{bmatrix}_1 & 0 & \cdots & 0 \\
+      0 & \mathbf{M}_2 & \cdots & 0 \\
+      \vdots & \vdots & \ddots & \vdots \\ 
+      0 & 0 & \cdots & \mathbf{M}_S
+\end{pmatrix}
+$$
+
+In this case, $S = 4$ stages, so we need four matrices $\mathbf{M}$. We can define for each stage $s$ the transition matrix:
+
+$$
+\mathbf{\Gamma}_s = \begin{pmatrix}
+\phi_A (1 - \gamma_{AB}) & \phi_A \gamma_{AB} & 1 - \phi_A \\
+\phi_B \gamma_{BA} & \phi_B (1 - \gamma_{BA}) & 1 - \phi_B \\
+0 & 0 & 1
+\end{pmatrix}
+\begin{matrix}
+z_{t-1} = \text{alive in the south (A)} \\
+z_{t-1} = \text{alive in the north (B)} \\
+z_{t-1} = \text{dead (D)}
+\end{matrix}
+$$
+And the observation matrix
+
+$$
+\mathbf{\Omega}_s = \begin{pmatrix}
+1 - p_A & p_A & 0 \\
+1 - p_B & 0 & p_B \\
+1 & 0 & 0
+\end{pmatrix}
+\begin{matrix}
+z_{t} = \text{alive in the south (A)} \\
+z_{t} = \text{alive in the north (B)} \\
+z_{t} = \text{dead (D)}
+\end{matrix}
+$$
+
+# Discarded code
+## Unsuccessful  try of Breeding probability transition matrix
+We have the stages:
+
+* Breeding ($1$)
+* No Breeding (including all Young of the year of 0 to 1 year) ($2$)
+* Dead ($3$)
+
+Assuming breeders and non-breeders have the same survival from $\mathbb{B}$, the transition matrix can be
+
+$$
+\mathbf{\Gamma}_h^{\text{breeding}} = \begin{pmatrix}
+  0 & \phi_1 \alpha_2 & \phi_1 (1 - \alpha_2) & 0 & 0 & 0 & 0 & 1 - \phi_1 \\
+  0 & 0 & 0 & \phi_2 \alpha_2 & \phi_2 (1 - \alpha_2) & 0 & 0 & 1 - \phi_2 \\
+  0 & 0 & 0 & \phi_2 \alpha_2 & \phi_2 (1 - \alpha_2) & 0 & 0 & 1 - \phi_2 \\
+  0 & 0 & 0 & \phi_3  (1 - \psi_{3 \rightarrow 4}) \alpha_3 & \phi_3 (1 - \psi_{3 \rightarrow 4}) (1 - \alpha_3) & \phi_3 (\psi_{3 \rightarrow 4}) \alpha_3 & \phi_3 (\psi_{3 \rightarrow 4}) (1 - \alpha_3) & 1 - \phi_3 \\
+  0 & 0 & 0 & \phi_3  (1 - \psi_{3 \rightarrow 4}) \alpha_3 & \phi_3 (1 - \psi_{3 \rightarrow 4}) (1 - \alpha_3) & \phi_3 (\psi_{3 \rightarrow 4}) \alpha_3 & \phi_3 (\psi_{3 \rightarrow 4}) (1 - \alpha_3) & 1 - \phi_3 \\
+  0 & 0 & 0 & 0 & 0 & \phi_4 \alpha_4 & \phi_4 (1 - \alpha_4) & 1 - \phi_4 \\
+  0 & 0 & 0 & 0 & 0 & \phi_4 \alpha_4 & \phi_4 (1 - \alpha_4) & 1 - \phi_4 \\
+  0 & 0 & 0 & 0 & 0 & 0 & 0 &1
+\end{pmatrix}_h \begin{matrix} z_{t-1} = 1NB \\ z_{t-1} = 2B \\ z_{t-1} = 2NB \\ z_{t-1} = 3B \\ z_{t-1} = 3NB \\ z_{t-1} = 4B \\ z_{t-1} = 4NB \\ z_{t-1} = 5D\end{matrix}
+$$
+
+where $\alpha_s$ is the breeding probability for stage $s$. 
+
+The observation matrix is
+$$
+\mathbf{\Omega}_h^{\text{breeding}} = \begin{bmatrix}
+    1-p_1 & p_1 & 0 & 0 & 0 & 0 & 0 & 0 \\
+    1-p_2 & 0 & p_2 & 0 & 0 & 0 & 0 & 0 \\
+    1-p_3 & 0 & 0 & p_3 & 0 & 0 & 0 & 0 \\
+    1-p_4 & 0 & 0 & 0 & p_4 & 0 & 0 & 0 \\
+    1-p_5 & 0 & 0 & 0 & 0 & p_5 & 0 & 0 \\
+    1-p_6 & 0 & 0 & 0 & 0 & 0 & p_6 & 0 \\
+    1-p_7 & 0 & 0 & 0 & 0 & 0 & 0 & p_7 \\
+    1 & 0 & 0 & 0 & 0 & 0 & 0 & 0 
+    \end{bmatrix}_h    
+    \begin{matrix} 
+      z_{t} = (1NB)\text{ Non-breeder young of the year of 0 to 1 years} = 1 \\
+      z_{t} = (2B)\text{ Breeder juvenile or young adult of 1 to 2 years} = 2 \\
+      z_{t} = (2NB)\text{ Non-breeder juvenile or young adult of 1 to 2 years} = 3 \\
+      z_{t} = (3B)\text{ Breeder adult of 2 to 12 years} = 4 \\
+      z_{t} = (3NB)\text{ Non-breeder adult of 2 to 12 years} = 5 \\
+      z_{t} = (4B)\text{ Breeder old adult of >12 years} = 6 \\
+      z_{t} = (4NB)\text{ Non-breeder old adult of >12 years} = 7 \\
+      z_{t} = \text{Dead} = 8
+    \end{matrix} 
+$$
+where column 1 corresponds to not detected, and the others as detected in each stage with breeding information, respectively.
+
+```{r}
+y_breeds_s <- resights_raw_dem_S |>
+  mutate(breeding = case_when(age_class_assumed == 1 ~ "NB",
+                              age_class_assumed %in% c(2:4) & breeding_status %in% c("Breeding", "Courtship") ~ "B",
+                              TRUE ~ "NB"),
+         breed.stage = paste0(age_class_assumed, "_", breeding), 
+         age_class_breeding = case_when(breed.stage == "1_NB" ~ 1,
+                                        breed.stage == "2_B" ~ 2,
+                                        breed.stage == "2_NB" ~ 3,
+                                        breed.stage == "3_B" ~ 4,
+                                        breed.stage == "3_NB" ~ 5,
+                                        breed.stage == "4_B" ~ 6,
+                                        TRUE ~ 7)) |>
+  select(unique.id, t, age_class_breeding) |>
+  pivot_wider(
+    names_from = t,
+    values_from = age_class_breeding, values_fn = min, values_fill = 0,
+    names_expand = TRUE
+  )
+
+y_breeds_s <- as.matrix(y_breeds_s[-1])
+
+first_s <- apply(y_breeds_s, 1, get.first)
+first_s
+
+my.data.s <- list(y = y_breeds_s + 1)
+my.constants.s <- list(first = first_s,
+                       Time = ncol(y_breeds_s),
+                       Kites = nrow(y_breeds_s))
+
+# replace all post-first-capture zeros by states 1-7
+zinits.s <- as.matrix(y_breeds_s)
+
+for(i in 1:nrow(zinits.s)) {
+  f <- first_s[i]
+  if(f < ncol(zinits.s)) {
+    last.state <- zinits.s[i, f]
+    for(t in (f + 1):ncol(zinits.s)) {
+      if(zinits.s[i, t] == 0) {
+        if(last.state == 1) {
+          # 1NB -> stage 2
+          zinits.s[i, t] <- sample(c(2, 3), 1)
+        } else if(last.state %in% c(2, 3)) {
+          # stage 2 -> stage 3
+          zinits.s[i, t] <- sample(c(4, 5), 1)
+        } else if(last.state %in% c(4, 5)) {
+          # stay in stage 3 at initialization
+          zinits.s[i, t] <- sample(c(4, 5), 1)
+        } else if(last.state %in% c(6, 7)) {
+          # stay in stage 4
+          zinits.s[i, t] <- sample(c(6, 7), 1)
+        }
+      } else {
+        last.state <- zinits.s[i, t]
+      }
+      last.state <- zinits.s[i, t]
+    }
+  }
+}
+
+initial.values.n <- function(){list(phi1 = runif(1, 0, 1), 
+                                  phi2 = runif(1, 0, 1), 
+                                  phi3 = runif(1, 0, 1), 
+                                  phi4 = runif(1, 0, 1), 
+                                  psi34 = runif(1, 0, 1),
+                                  alpha2 = runif(1, 0, 1),
+                                  alpha3 = runif(1, 0, 1),
+                                  alpha4 = runif(1, 0, 1),
+                                  p1 = runif(1, 0, 1), 
+                                  p2 = runif(1, 0, 1), 
+                                  p3 = runif(1, 0, 1),
+                                  p4 = runif(1, 0, 1),
+                                  p5 = runif(1, 0, 1), 
+                                  p6 = runif(1, 0, 1),
+                                  p7 = runif(1, 0, 1),
+                                  z = zinits.s)}
+
+parameters.to.save.cjs.b <- c("phi1", "phi2", "phi3", "phi4",
+                              "psi34", 
+                              "alpha2", "alpha3", "alpha4",
+                              "p1", "p2", "p3", "p4", "p5", "p6", "p7")
+
+```
+
+```{r eval=FALSE}
+library(nimble)
+library(MCMCvis)
+
+simple_cjs_b <- nimbleCode({
+  # -------------------------------------------------
+  # Age classes:
+  # 1: Young of year (0-1 yr) (non-breeder)
+  # 2: Juvenile / Young adult (1-2 yr) (breeder or non-breeder)
+  # 3: Adult (2-12 yr) (breeder or non-breeder)
+  # 4: Old adult (>= 13 yr) (breeder or non-breeder)
+  # -------------------------------------------------
+  # Parameters:
+  # phi1: survival probability stage 1
+  # phi2: survival probability stage 2
+  # phi3: survival probability stage 3
+  # phi4: survival probability stage 4
+  # psi34: transition probability from stage 3 to stage 4
+  # alpha2: breeding probability for stage 2
+  # alpha3: breeding probability for stage 3
+  # alpha4: breeding probability for stage 4
+  # p1: recapture probability stage 1
+  # p2: recapture probability stage 2
+  # p3: recapture probability stage 3
+  # p4: recapture probability stage 4
+  # p5: recapture probability stage 5
+  # p6: recapture probability stage 6
+  # p7: recapture probability stage 7
+  # -------------------------------------------------
+  # States (z):
+  # 1 alive at stage 1 (0-1 yr non-breeder)
+  # 2 alive at stage 2 (1-2 yrs breeder)
+  # 3 alive at stage 3 (1-2 yrs non-breeder)
+  # 4 alive at stage 4 (2-12 yrs breeder)
+  # 5 alive at stage 5 (2-12 yrs non-breeder)
+  # 6 alive at stage 6 (>12 yrs breeder)
+  # 7 alive at stage 7 (>12 yrs non-breeder)
+  # 8 dead
+  # -------------------------------------------------
+  # Observations (y):  
+  # 1 not detected
+  # 2 detected as 1
+  # 3 detected as 2
+  # 4 detected as 3
+  # 5 detected as 4
+  # 6 detected as 5
+  # 7 detected as 6
+  # 8 detected as 7
+  # -------------------------------------------------
+  
+  # priors (we can use the estimated values)
+  phi1 ~ dunif(0, 1)
+  phi2 ~ dunif(0, 1)
+  phi3 ~ dunif(0, 1)
+  phi4 ~ dunif(0, 1)
+  p1 ~ dunif(0, 1)
+  p2 ~ dunif(0, 1)
+  p3 ~ dunif(0, 1)
+  p4 ~ dunif(0, 1)
+  p5 ~ dunif(0, 1)
+  p6 ~ dunif(0, 1)
+  p7 ~ dunif(0, 1)
+  psi34 ~ dunif(0, 1)
+  alpha2 ~ dunif(0, 1)
+  alpha3 ~ dunif(0, 1)
+  alpha4 ~ dunif(0, 1)
+
+  # probabilities of state z(t+1) given z(t)
+  gamma[1,1] <- 0
+  gamma[1,2] <- phi1 * alpha2
+  gamma[1,3] <- phi1 * (1 - alpha2)
+  gamma[1,4] <- 0
+  gamma[1,5] <- 0
+  gamma[1,6] <- 0
+  gamma[1,7] <- 0
+  gamma[1,8] <- 1 - phi1
+  gamma[2,1] <- 0
+  gamma[2,2] <- 0
+  gamma[2,3] <- 0
+  gamma[2,4] <- phi2 * alpha2
+  gamma[2,5] <- phi2 * (1 - alpha2)
+  gamma[2,6] <- 0
+  gamma[2,7] <- 0
+  gamma[2,8] <- 1 - phi2
+  gamma[3,1] <- 0
+  gamma[3,2] <- 0
+  gamma[3,3] <- 0
+  gamma[3,4] <- phi2 * alpha2
+  gamma[3,5] <- phi2 * (1 - alpha2)
+  gamma[3,6] <- 0
+  gamma[3,7] <- 0
+  gamma[3,8] <- 1 - phi2
+  gamma[4,1] <- 0
+  gamma[4,2] <- 0
+  gamma[4,3] <- 0
+  gamma[4,4] <- phi3 * (1 - psi34) * alpha3
+  gamma[4,5] <- phi3 * (1 - psi34) * (1 - alpha3)
+  gamma[4,6] <- phi3 * psi34 * alpha3
+  gamma[4,7] <- phi3 * psi34 * (1 - alpha3)
+  gamma[4,8] <- 1 - phi3
+  gamma[5,1] <- 0
+  gamma[5,2] <- 0
+  gamma[5,3] <- 0
+  gamma[5,4] <- phi3 * (1 - psi34) * alpha3
+  gamma[5,5] <- phi3 * (1 - psi34) * (1 - alpha3)
+  gamma[5,6] <- phi3 * psi34 * alpha3
+  gamma[5,7] <- phi3 * psi34 * (1 - alpha3)
+  gamma[5,8] <- 1 - phi3
+  gamma[6,1] <- 0
+  gamma[6,2] <- 0
+  gamma[6,3] <- 0
+  gamma[6,4] <- 0
+  gamma[6,5] <- 0
+  gamma[6,6] <- phi4 * alpha4
+  gamma[6,7] <- phi4 * (1 - alpha4)
+  gamma[6,8] <- 1 - phi4
+  gamma[7,1] <- 0
+  gamma[7,2] <- 0
+  gamma[7,3] <- 0
+  gamma[7,4] <- 0
+  gamma[7,5] <- 0
+  gamma[7,6] <- phi4 * alpha4
+  gamma[7,7] <- phi4 * (1 - alpha4)
+  gamma[7,8] <- 1 - phi4
+  gamma[8,1] <- 0
+  gamma[8,2] <- 0
+  gamma[8,3] <- 0
+  gamma[8,4] <- 0
+  gamma[8,5] <- 0
+  gamma[8,6] <- 0
+  gamma[8,7] <- 0
+  gamma[8,8] <- 1
+  
+  # probabilities of y(t) given z(t)
+  omega[1,1] <- 1 - p1     # Pr(alive 1 t -> non-detected t)
+  omega[1,2] <- p1         # Pr(alive 1 t -> detected 1 t)
+  omega[1,3] <- 0          # Pr(alive 1 t -> detected 2 t)
+  omega[1,4] <- 0          # Pr(alive 1 t -> detected 3 t)
+  omega[1,5] <- 0          # Pr(alive 1 t -> detected 4 t)
+  omega[1,6] <- 0          # Pr(alive 1 t -> detected 5 t)
+  omega[1,7] <- 0          # Pr(alive 1 t -> detected 6 t)
+  omega[1,8] <- 0          # Pr(alive 1 t -> detected 7 t)
+  omega[2,1] <- 1 - p2     # Pr(alive 2 t -> non-detected t)
+  omega[2,2] <- 0          # Pr(alive 2 t -> detected 1 t)
+  omega[2,3] <- p2         # Pr(alive 2 t -> detected 2 t)
+  omega[2,4] <- 0          # Pr(alive 2 t -> detected 3 t)
+  omega[2,5] <- 0          # Pr(alive 2 t -> detected 4 t)
+  omega[2,6] <- 0          # Pr(alive 2 t -> detected 5 t)
+  omega[2,7] <- 0          # Pr(alive 2 t -> detected 6 t)
+  omega[2,8] <- 0          # Pr(alive 2 t -> detected 7 t)
+  omega[3,1] <- 1 - p3     # Pr(alive 3 t -> non-detected t)
+  omega[3,2] <- 0          # Pr(alive 3 t -> detected 1 t)
+  omega[3,3] <- 0          # Pr(alive 3 t -> detected 2 t)
+  omega[3,4] <- p3         # Pr(alive 3 t -> detected 3 t)
+  omega[3,5] <- 0          # Pr(alive 3 t -> detected 4 t)
+  omega[3,6] <- 0          # Pr(alive 3 t -> detected 5 t)
+  omega[3,7] <- 0          # Pr(alive 3 t -> detected 6 t)
+  omega[3,8] <- 0          # Pr(alive 3 t -> detected 7 t)
+  omega[4,1] <- 1 - p4     # Pr(alive 4 t -> non-detected t)
+  omega[4,2] <- 0          # Pr(alive 4 t -> detected 1 t)
+  omega[4,3] <- 0          # Pr(alive 4 t -> detected 2 t)
+  omega[4,4] <- 0          # Pr(alive 4 t -> detected 3 t)
+  omega[4,5] <- p4         # Pr(alive 4 t -> detected 4 t)
+  omega[4,6] <- 0          # Pr(alive 3 t -> detected 5 t)
+  omega[4,7] <- 0          # Pr(alive 3 t -> detected 6 t)
+  omega[4,8] <- 0          # Pr(alive 3 t -> detected 7 t)
+  omega[5,1] <- 1 - p5     # Pr(alive 5 t -> non-detected t)
+  omega[5,2] <- 0          # Pr(alive 5 t -> detected 1 t)
+  omega[5,3] <- 0          # Pr(alive 5 t -> detected 2 t)
+  omega[5,4] <- 0          # Pr(alive 5 t -> detected 3 t)
+  omega[5,5] <- 0          # Pr(alive 5 t -> detected 4 t)
+  omega[5,6] <- p5         # Pr(alive 5 t -> detected 5 t)
+  omega[5,7] <- 0          # Pr(alive 5 t -> detected 6 t)
+  omega[5,8] <- 0          # Pr(alive 5 t -> detected 7 t)
+  omega[6,1] <- 1 - p6     # Pr(alive 6 t -> non-detected t)
+  omega[6,2] <- 0          # Pr(alive 6 t -> detected 1 t)
+  omega[6,3] <- 0          # Pr(alive 6 t -> detected 2 t)
+  omega[6,4] <- 0          # Pr(alive 6 t -> detected 3 t)
+  omega[6,5] <- 0          # Pr(alive 6 t -> detected 4 t)
+  omega[6,6] <- 0          # Pr(alive 6 t -> detected 5 t)
+  omega[6,7] <- p6         # Pr(alive 6 t -> detected 6 t)
+  omega[6,8] <- 0          # Pr(alive 6 t -> detected 7 t)
+  omega[7,1] <- 1 - p7     # Pr(alive 7 t -> non-detected t)
+  omega[7,2] <- 0          # Pr(alive 7 t -> detected 1 t)
+  omega[7,3] <- 0          # Pr(alive 7 t -> detected 2 t)
+  omega[7,4] <- 0          # Pr(alive 7 t -> detected 3 t)
+  omega[7,5] <- 0          # Pr(alive 7 t -> detected 4 t)
+  omega[7,6] <- 0          # Pr(alive 7 t -> detected 5 t)
+  omega[7,7] <- 0          # Pr(alive 7 t -> detected 6 t)
+  omega[7,8] <- p7         # Pr(alive 7 t -> detected 7 t)
+  omega[8,1] <- 1          # Pr(dead t -> non-detected t)
+  omega[8,2] <- 0          # Pr(dead t -> detected 1 t)
+  omega[8,3] <- 0          # Pr(dead t -> detected 2 t)
+  omega[8,4] <- 0          # Pr(dead t -> detected 3 t)
+  omega[8,5] <- 0          # Pr(dead t -> detected 4 t)
+  omega[8,6] <- 0          # Pr(dead t -> detected 5 t)
+  omega[8,7] <- 0          # Pr(dead t -> detected 6 t)
+  omega[8,8] <- 0          # Pr(dead t -> detected 7 t)
+  
+  # likelihood 
+  for (k in 1:Kites){
+    # latent state at first capture
+    z[k, first[k]] <- y[k, first[k]] - 1
+    for (t in (first[k]+1):Time){
+      # z(t) given z(t-1)
+      z[k,t] ~ dcat(gamma[z[k,t-1], 1:8])
+      # y(t) given z(t)
+      y[k,t] ~ dcat(omega[z[k,t], 1:8])
+    }
+  }
+})
+```
+
+Run nimble. Using 10000 iterations, 5000 burn-in of 2 chains, run from 11:58 to 12:14, but convergence is awful!
+![Results of an initial model with few iterations and poor mixing of chains - see those huge intervals! :'( ](figures/CJS_breeding_10k.jpeg)
+
+MCMC settings
+```{r}
+n.iter <- 20000
+n.burnin <- 10000
+n.chains <- 2
+```
+
+from 13:12 to 13:42
+```{r eval = FALSE}
+mcmc.simple.cjs.br.s <- nimbleMCMC(code = simple_cjs_b, 
+                             constants = my.constants.s,
+                             data = my.data.s,              
+                             inits = initial.values.s(),
+                             monitors = parameters.to.save.cjs.b,
+                             niter = n.iter,
+                             nburnin = n.burnin, 
+                             nchains = n.chains, 
+                             WAIC = TRUE)
+saveRDS(mcmc.simple.cjs.br.s, "data/mcmc_CJS_breeding_south_2006_2026_20k.RDS")
+```
+
+```{r}
+mcmc.simple.cjs.br.s <- readRDS("data/mcmc_CJS_breeding_south_2006_2026_20k.RDS")
+MCMCsummary(mcmc.simple.cjs.br.s$samples, round = 2)
+MCMCplot(mcmc.simple.cjs.br.s$samples, main = "South - breeding")
+MCMCtrace(mcmc.simple.cjs.br.s$samples, pdf = FALSE)
+```
+
+There is not good convergence  (see Rhats and n.eff < 100)
