@@ -15,11 +15,18 @@ editor_options:
 
 To understand better the estimation of a $\lambda$ parameter (asymptotic population growth rate) within a demographic population viability analysis (PVA), I have generated this code following [Hunter & Caswell (2005)](https://doi.org/10.1016/j.ecolmodel.2005.05.002)) manuscript. Although their paper describing the spatial matrix population models that keeps demography and dispersal parameters clearly distinguished is openly available, I struggled to understand the adjustment to the snail kite spatio-demographic PVA. Therefore, many of the text included here belongs to the original paper. I also try to adjust some notation to follow the modeling more clearly in my less advantaged math mind. 
 
+```{r Packages}
+library(tidyverse) # data manipulation and visualization
+library(nimble) # fit Bayesian models
+library(MCMCvis) # visualization of Bayesian models results
+```
+
 # Population Viability Analysis for snail kite (up to 2023)
 
 This section is the original code from the report, adjusted with data up to 2023 by Orlando Acevedo-Charry to estimate the dominant eigenvalue of the projection matrix $\mathbf{A}$ of a matrix population model. 
 
 ```{r eval = FALSE}
+# this chunk is eval=FALSE
 ##########################################################
 #Spatial PVA for kites template: 
 #written by Rob Fletcher and Josh Cullen
@@ -523,6 +530,7 @@ saveRDS(df_lambda_patch, file = "data/df_lambda_patch.RDS")
 ```
 
 ```{r eval=FALSE, echo=FALSE}
+# this chunk is eval=FALSE and echo=FALSE
 # continuation of the PVA_taken_manag_new.R code
 
 # Flatten the nested sim_results list into a tibble.
@@ -1332,11 +1340,10 @@ lambda_take_mean <- N.mu_desired %>%
             median_lambda =median(lambda))
 ```
 
-I reduced some values to make quick computation. In addition, I saved the deterministic $\lambda$ (per patch $\lambda_{\mathbf{B}_{h}}$ and for the metapopulation $\lambda_{\mathbf{A}}$) to have the values below. 
+I reduced some values to make quick (and dirty) computation. In addition, I saved the deterministic $\lambda$ (per patch $\lambda_{\mathbf{B}_{h}}$ and for the metapopulation $\lambda_{\mathbf{A}}$) to have the values below, as the dominant eigenvalue using the function `eigen()` (**"just"** linear algebra, see if you dare [this](https://www.youtube.com/watch?v=PFDu9oVAE-g&t=34s) or [this](https://www.youtube.com/watch?v=pMjbWgN97pw)). 
 
-```{r}
-library(tidyverse)
-
+```{r Lambda estimates from PVA up to 2023}
+# lambda estimates from PVA up to 2023
 lambda_metaP <- readRDS(here::here("data/df_lambda_meta.RDS")) %>%  # the here::here() anchors the file paths to the main project root, no matter where the .Rmd file is sitting.
   mutate(take = factor(take, levels = c("0", "0.2", "0.5"),
                              labels = c("0%", "20%", "50%"))) |>
@@ -1383,6 +1390,8 @@ ggplot(lambda_patchB, aes(x = year + 2022,
   theme(strip.background = element_blank(), axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
 
 ```
+
+So the deterministic asymptotic growth rate for the metapopulation is just above 1 ($\lambda_{\mathbf{A}} = 1.035$), but the patch-specific asymptotic growth rate varies from 0.872 ($\lambda_{\mathbf{B}_{\text{EAST}}}$) to 1.12 ($\lambda_{\mathbf{B}_{\text{SJM}}}$).
 
 But, how this model was elaborated? How we can improved/updated? In what follows, I will try to understand the spatial and demographically structured matrix population model from the perspective of our snail kite project.
 
@@ -1542,7 +1551,7 @@ $$
 $$
 and the elements within $\mathbf{B}_h$ represents different population parameters. Let's begin with the transitions subdiagonals $G_s$ of the Lefkovitch matrix, which can be parameterized as $G_s = \phi_s \psi_s$, where $\phi_s$ is annual survivorship and $\psi_s$ is the probability of advancing to the next stage given survival. Stage 1 and 2 are fixed in time, so an individual surviving a year in stage 1 **must** enter stage 2, and an individual surviving a year in stage 2 **must** enter stage 3; transitions $G_1$ and $G_2$ in the Lefkovitch matrix is represented by the annual survival $\phi_1$ and $\phi_2$, respectability. In stage 3 (2-12 yr), an individual can survive and remain in stage 3, can survive and become >12 (stage 4), or can die. This transition is parameterized as $G_3 = \phi_3 \gamma_3$. Stage 4 is the terminal stage, so there is no "transition" ($G_4 = 0$). The conditions of our stage means that the diagonal of stage survival probability $Q_s$ (the probability to stay at stage $s$; $Q_s = \phi_s (1 - \gamma_s)$) is 0 for stages 1 and 2. In stage 3, this stage survival probability becomes $Q_3 = \phi_3 (1-\gamma_3)$ (the individual survive stage 3 and does not transition to stage 4). Because individuals in the terminal stage (4) do not transition to a next stage, the stage survival probability is the annual survival probability $Q_4 = \phi_4$. Finally, we have the fertility. Evidently, individuals within stage 1 ($<1$ year) do not have fertility, so $F_1 = 0$. The fertility of the different stages from 2 to 4 is represented by $F_2$, $F_3$, and $F_4$. 
 
-This model can be simplify to include only two stages: 1) juveniles or young adults and 2) adults (including old scenecent adults, but see [Reichert et al. 2010](https://nsojournals.onlinelibrary.wiley.com/doi/10.1111/j.1600-0706.2010.18366.x) and [Reichert et al. 2016](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0162690)):
+This model can be simplify to include only two stages: 1) juveniles or young adults and 2) adults (including old senescent adults, but see [Reichert et al. 2010](https://nsojournals.onlinelibrary.wiley.com/doi/10.1111/j.1600-0706.2010.18366.x) and [Reichert et al. 2016](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0162690)):
 $$
 \begin{pmatrix} 
   \begin{bmatrix}
@@ -1599,6 +1608,35 @@ $$
   \end{bmatrix} \\
   \begin{bmatrix}
   n_{1,2} \\ n_{2,2}  
+  \end{bmatrix}
+\end{pmatrix}(t)
+$$
+
+My approach in what follows is:
+
+$$
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{2,1} \\ n_{3,1} \\ n_{4,1}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{1,2} \\ n_{2,2} \\ n_{3,2} \\ n_{4,2}
+  \end{bmatrix}
+\end{pmatrix} (t + 1) = \begin{pmatrix}
+      \mathbf{B}_1 = \begin{bmatrix} 
+      0 & F_2 & F_3 & F_4 \\
+      \phi_1 & 0 & 0 & 0  \\
+      0 & \phi_2 & \phi_3 (1 - \psi_{3 \rightarrow 4}) & 0 \\
+      0 & 0 & \phi_3 \psi_{3 \rightarrow 4} & \phi_4 \\
+      \end{bmatrix}_1 & 0 \\
+      0 & \mathbf{B}_2
+\end{pmatrix} \times
+\begin{pmatrix} 
+  \begin{bmatrix}
+  n_{1,1} \\ n_{2,1} \\ n_{3,1} \\ n_{4,1}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{1,2} \\ n_{2,2} \\ n_{3,2} \\ n_{4,2}
   \end{bmatrix}
 \end{pmatrix}(t)
 $$
@@ -1687,7 +1725,7 @@ $$
 
 and the elements within $\mathbf{M}_s$ represents movement probability across patches.
 
-In the very simplified model (2 stages and 2 patches), we have:
+In the very simplified model (2 stages and 2 patches), we have (but see below):
 
 $$
 \begin{pmatrix} 
@@ -1696,13 +1734,21 @@ $$
   \end{bmatrix} \\
   \begin{bmatrix}
   n_{2,1} \\ n_{2,2}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{3,1} \\ n_{3,2}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{4,1} \\ n_{4,2}
   \end{bmatrix}
 \end{pmatrix} (t + 1) = \begin{pmatrix}
       \mathbf{M}_1 = \begin{bmatrix} 
       m_{1,1} & m_{1,2} \\
       m_{2,1} & m_{2,2} 
-      \end{bmatrix}_1 & 0 \\
-      0 & \mathbf{M}_2 
+      \end{bmatrix}_1 & 0 & 0 & 0 \\
+      0 & \mathbf{M}_2 & 0 & 0 \\
+      0 & 0 & \mathbf{M}_3 & 0 \\
+      0 & 0 & 0 & \mathbf{M}_4
 \end{pmatrix} \times
 \begin{pmatrix} 
   \begin{bmatrix}
@@ -1710,8 +1756,14 @@ $$
   \end{bmatrix} \\
   \begin{bmatrix}
   n_{2,1} \\ n_{2,2}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{3,1} \\ n_{3,2}
+  \end{bmatrix} \\
+  \begin{bmatrix}
+  n_{4,1} \\ n_{4,2}
   \end{bmatrix}
-\end{pmatrix}(t)
+\end{pmatrix} (t)
 $$
 
 ## Incorporating demography and dispersal with the vec operartor
@@ -1752,7 +1804,7 @@ $$
 \end{bmatrix}
 $$
 
-The $\text{vec}$ operator stacks the columns of a matrix one on top of the other. Something like:
+The $\text{vec}$ operator stacks the columns of a matrix one on top of the other. Using 4 stages and 2 patches, something like:
 
 $$
 \text{vec}(\mathbf{N}) = \begin{pmatrix}
@@ -1763,49 +1815,17 @@ $$
   n_{1,2} \\
   n_{2,2} \\
   n_{3,2} \\
-  n_{4,2} \\ 
-  n_{1,3} \\
-  n_{2,3} \\
-  n_{3,3} \\
-  n_{4,3} \\ 
-  n_{1,4} \\
-  n_{2,4} \\
-  n_{3,4} \\
-  n_{4,4} \\ 
-  n_{1,5} \\
-  n_{2,5} \\
-  n_{3,5} \\
-  n_{4,5} \\
-  n_{1,6} \\
-  n_{2,6} \\
-  n_{3,6} \\
-  n_{4,6}
+  n_{4,2} 
   \end{pmatrix};\ 
 \text{vec}(\mathbf{N}^\top) = \begin{bmatrix}
   n_{1,1} \\ 
   n_{1,2} \\ 
-  n_{1,3} \\ 
-  n_{1,4} \\
-  n_{1,5} \\
-  n_{1,6} \\
   n_{2,1} \\
   n_{2,2} \\
-  n_{2,3} \\ 
-  n_{2,4} \\
-  n_{2,5} \\
-  n_{2,6} \\
   n_{3,1} \\
   n_{3,2} \\ 
-  n_{3,3} \\
-  n_{3,4} \\
-  n_{3,5} \\
-  n_{3,6} \\
   n_{4,1} \\
-  n_{4,2} \\ 
-  n_{4,3} \\
-  n_{4,4} \\
-  n_{4,5} \\
-  n_{4,6}
+  n_{4,2}
   \end{bmatrix}
 $$
 
@@ -2052,11 +2072,11 @@ $$
 \end{pmatrix}
 $$
 
-And then, iterate the positions. We can use a code to reproduce this, but with smaller stages and patches for representative purposes:
+And then, iterate the positions. We can use a code to reproduce this, but with few patches for representative purposes:
 
 ```{r}
-S <- 2 # two stages (J-A)
-H <- 2 # two patches (N-S)
+S <- 4 # four stages (G, age 0-1; J/YA, age 1-2; A, age 2-12; OA, age >12)
+H <- 2 # two patches (N; S)
 
 P <- matrix(0, S*H, S*H)
 P
@@ -2081,8 +2101,12 @@ $$
 \text{vec}(\mathbf{N}) = \begin{pmatrix}
   n_{1,1} \\ 
   n_{2,1} \\ 
+  n_{3,1} \\ 
+  n_{4,1} \\
   n_{1,2} \\
-  n_{2,2}
+  n_{2,2} \\
+  n_{3,2} \\
+  n_{4,2}
   \end{pmatrix},
 $$
 then permute the result to reorganize the population vector by stages:
@@ -2091,7 +2115,11 @@ $$
   n_{1,1} \\ 
   n_{1,2} \\ 
   n_{2,1} \\
-  n_{2,2}
+  n_{2,2} \\
+  n_{3,1} \\
+  n_{3,2} \\ 
+  n_{4,1} \\
+  n_{4,2}
   \end{bmatrix},
 $$
 applies the block dispersal matrix $\mathbb{M}$, and then permutes the result back to the original organization of the population by patches ($\text{vec}(\mathbf{N})$).
@@ -2179,6 +2207,8 @@ $$
 $$
 where column 1 corresponds to not detected, and the others as detected in each state, respectively.
 
+These matrix transitions can be fitted with a categorical distribution, in `nimble::dcat`.
+
 We can adjust the data from the snail kite new database to have the observation matrix with age classes 1, 2, 3, 4. 
 
 ```{r}
@@ -2193,8 +2223,6 @@ helpers_text_fixed <- gsub("sys\\.frame\\(1\\)\\$ofile", "here::here('skutils/lo
 
 # Evaluate the safe code directly into your Markdown environment
 eval(parse(text = helpers_text_fixed), envir = .GlobalEnv)
-
-library(tidyverse)
 
 resights <- read_sk_export("resights", dir = here::here("data"))
 survey_efforts <- read_sk_export("survey_efforts", dir = here::here("data"))
@@ -2276,7 +2304,7 @@ data_snki <- resights |>
          month = month(date)) |>
   filter(year %in% c(2006:2026))
 
-# 2023 has no resights in the south, so it migh be convinient to "force" the full set of data
+# 2023 has no resights in the south, so it might be convenient to "force" the "full" set of data
 all_years <- paste0("year_", 2006:2026)
 
 # include individual information and assign the states
@@ -2358,12 +2386,10 @@ first_s <- apply(y.age.s, 1, get.first)
 first_s
 ```
 
-This state-space structure looks in `NIMBLE` as:
+This state-space structure looks in `nimble` as:
 
 ```{r eval=FALSE}
-library(nimble)
-library(MCMCvis)
-
+# nimble model of simple CJS adjusted for snail kite demography (without movement)
 simple_cjs <- nimbleCode({
   # -------------------------------------------------
   # Age classes:
@@ -2475,11 +2501,9 @@ simple_cjs <- nimbleCode({
     }
   }
 })
-
 ```
 
-
-Data in list, adding 1 (so no detection 0 becomes 1, detection as juvenile 1 becomes 2, and detection as adult becomes 3 - `NIMBLE` categories does not like 0s).
+Data in list, adding 1 (so non-detection 0 becomes 1, detection as juvenile 1 becomes 2, and detection as adult becomes 3 - `nimble` categories does not like 0s).
 
 ```{r}
 my.data.s <- list(y = y.age.s + 1)
@@ -2530,6 +2554,7 @@ n.chains <- 2
 
 Run nimble.
 ```{r eval = FALSE}
+# this chunk is eval=FALSE
 mcmc.simple.cjs.s <- nimbleMCMC(code = simple_cjs, 
                              constants = my.constants.s,
                              data = my.data.s,              
@@ -2543,9 +2568,6 @@ saveRDS(mcmc.simple.cjs.s, "data/mcmc_CJS_south_2006_2026.RDS")
 ```
 
 ```{r}
-library(nimble)
-library(MCMCvis)
-
 mcmc.simple.cjs.s <- readRDS("data/mcmc_CJS_south_2006_2026.RDS")
 MCMCsummary(mcmc.simple.cjs.s$samples, round = 3)
 MCMCplot(mcmc.simple.cjs.s$samples, main = "South")
@@ -2639,6 +2661,7 @@ initial.values.n <- function(){list(phi1 = runif(1, 0, 1),
 
 Run nimble.
 ```{r eval = FALSE}
+# this chunk is eval=FALSE
 mcmc.simple.cjs.n <- nimbleMCMC(code = simple_cjs, 
                              constants = my.constants.n,
                              data = my.data.n,              
@@ -2847,6 +2870,7 @@ fledge_fem
 ### Computing fecundity vector
 
 So, fecundity in each stage $s$ in the south ($h=1$) and in the north ($h = 2$) are
+
 $$
 F_{s,h} = \pi_{s, h} \times \tau_h \times f_h \\
 F_{2,1} = 0.120 \times 0.650 \times 0.817 = 0.064 \\
@@ -2856,8 +2880,7 @@ F_{3,1} = 0.641 \times 0.650 \times 0.817 = 0.340 \\
 F_{3,2} = 0.831 \times 0.681 \times 1.020 = 0.577 \\
 
 F_{4,1} = 0.467 \times 0.650 \times 0.817 = 0.248 \\
-F_{4,2} = 0.840 \times 0.681 \times 1.020 = 0.583 \\
-
+F_{4,2} = 0.840 \times 0.681 \times 1.020 = 0.583
 $$
 
 These values came from:
@@ -2889,8 +2912,55 @@ $$
 \end{pmatrix}
 $$
 
+which means that the patch-level deterministic asymptotic growth rate $\lambda_{\mathbf{B}_h}$ are
+
+```{r}
+B1 <- matrix(
+  c(
+    0,     0.064, 0.340, 0.248,
+    0.474, 0,     0,     0,
+    0,     0.694, 0.714, 0,
+    0,     0,     0.046, 0.748
+  ),
+  nrow = 4,
+  ncol = 4,
+  byrow = TRUE
+)
+
+eigB1 <- eigen(B1)
+lambda_South <- Re(eigB1$values[which.max(Re(eigB1$values))])
+lambda_South
+
+B2 <- matrix(
+  c(
+    0,     0.215, 0.577, 0.583,
+    0.607, 0,     0,     0,
+    0,     0.765, 0.808, 0,
+    0,     0,     0.020, 0.686
+  ),
+  nrow = 4,
+  ncol = 4,
+  byrow = TRUE
+)
+
+eigB2 <- eigen(B2)
+lambda_North <- Re(eigB2$values[which.max(Re(eigB2$values))])
+lambda_North
+
+# and the block matrix is:
+B <- rbind(
+  cbind(B1, matrix(0, nrow = 4, ncol = 4)),
+  cbind(matrix(0, nrow = 4, ncol = 4), B2)
+)
+
+B
+```
+
+In the absence of dispersal, the northern population with higher fertility would have a higher growth rate ($\lambda_{\mathbf{B}_2} = 1.080$) than the southern population ($\lambda_{\mathbf{B}_1} = 0.893$).
+
 ## Dispersal of snail kites without demography
 
+To estimate the block diagonal matrix describing dispersal:
 $$
 \mathbb{M} = \begin{pmatrix}
       \mathbf{M}_1 = \begin{bmatrix} 
@@ -2903,14 +2973,14 @@ $$
 \end{pmatrix}
 $$
 
-In this case, $S = 4$ stages, so we need four matrices $\mathbf{M}$. We can define for each stage $s$ the transition matrix:
+We can use again the multi-state survival model but in this case, $S = 4$ stages, so we need four matrices $\mathbf{M}$. We can define for each stage $s$ the transition matrix:
 
 $$
 \mathbf{\Gamma}_s = \begin{pmatrix}
 \phi_A (1 - \gamma_{AB}) & \phi_A \gamma_{AB} & 1 - \phi_A \\
 \phi_B \gamma_{BA} & \phi_B (1 - \gamma_{BA}) & 1 - \phi_B \\
 0 & 0 & 1
-\end{pmatrix}
+\end{pmatrix}_s
 \begin{matrix}
 z_{t-1} = \text{alive in the south (A)} \\
 z_{t-1} = \text{alive in the north (B)} \\
@@ -2924,7 +2994,7 @@ $$
 1 - p_A & p_A & 0 \\
 1 - p_B & 0 & p_B \\
 1 & 0 & 0
-\end{pmatrix}
+\end{pmatrix}_s
 \begin{matrix}
 z_{t} = \text{alive in the south (A)} \\
 z_{t} = \text{alive in the north (B)} \\
@@ -2932,7 +3002,333 @@ z_{t} = \text{dead (D)}
 \end{matrix}
 $$
 
-# Discarded code
+However, stage 1 and 2 are fixed in time for transition (0-1 and 1-2 years), therefore to model dispersal **without** demography in $\mathbf{M}_s$ we should "*recordar*" our assumptions on the stage model. Recall that $\mathbf{M}_s$ is the dispersal matrix for stage $s$, so the element $m_{ij}^{(s)}$ are the probability that an individual $k$ of stage $s$ moves from patch $j$ to $i$. Given that demography is not included in $\mathbf{M}_s$, $\mathbf{M}_1$ and $\mathbf{M}_2$ is reduced to an identity matrix as in the second example of [Hunter & Caswell (2005)](https://doi.org/10.1016/j.ecolmodel.2005.05.002)) manuscript: dispersion is evident as a recapture in age classess 3 and 4.
+
+$$
+\mathbb{M} = \begin{pmatrix}
+      \mathbf{M}_1 = \begin{bmatrix} 
+      0 & 0 \\
+      0 & 0
+      \end{bmatrix}_1 & 0 & 0 & 0 \\
+      0 & \mathbf{M}_2  = \begin{bmatrix} 
+      0 & 0 \\
+      0 & 0
+      \end{bmatrix}_2 & 0 & 0 \\
+      0 & 0 & \mathbf{M}_3  = \begin{bmatrix} 
+      m_{1,1} = \phi_A (1 - \gamma_{AB}) & m_{1,2} = \phi_B \gamma_{BA} \\
+      m_{2,1} = \phi_A \gamma_{AB} & m_{2,2} = \phi_B (1 - \gamma_{BA})
+      \end{bmatrix}_3 & 0 \\ 
+      0 & 0 & 0 & \mathbf{M}_4 = \begin{bmatrix} 
+      m_{1,1} & m_{1,2} \\
+      m_{2,1} & m_{2,2}
+      \end{bmatrix}_4
+\end{pmatrix}
+$$
+
+We have the `data_snki` dataset to join with the `bands` and `birds` datasets for the resights. So, we can construct the data for each $s = \{3,\ 4\}$
+
+```{r}
+resights_raw_dem <- data_snki |>
+    left_join(bands) |>
+    left_join(birds) |>
+    mutate(age_num = (year - birth_year)) |>
+    dplyr::select(c(date, survey_code, area.x, breeding_status, unique.id, year, month, region,
+                    age_num, age_class, birth_year)) |>
+    filter(age_num >= 0) |> 
+    mutate(
+      age_class_assumed = case_when(age_num >= 13 ~ 4,
+                                       age_num < 13 & age_num >= 2 ~ 3,
+                                       age_num < 2 & age_num >= 1 ~ 2,
+                                       age_num < 1 ~ 1,
+                                       TRUE ~ age_num), 
+      t = paste0("year_", year),
+      t = factor(t, levels = all_years),
+      patch_h = case_when(region %in% c("SJM", "PP", "OKEE", "KRV", "N") ~ 2,
+                          TRUE ~ 1))
+
+# check results
+table(resights_raw_dem$patch_h, resights_raw_dem$age_class_assumed)
+
+#stage 3
+y_s3 <- resights_raw_dem |>
+  filter(age_class_assumed == 3) |>
+  distinct(unique.id, patch_h, t) |>
+  arrange(t) |>
+  pivot_wider(
+    names_from = t,
+    values_from = patch_h, values_fn = min, values_fill = 0,
+    names_expand = TRUE
+  )
+
+y_s3_m <- as.matrix(y_s3[-1])
+
+#stage 4
+y_s4 <- resights_raw_dem |>
+  filter(age_class_assumed == 4) |>
+  distinct(unique.id, patch_h, t) |>
+  arrange(t) |>
+  pivot_wider(
+    names_from = t,
+    values_from = patch_h, values_fn = min, values_fill = 0,
+    names_expand = TRUE
+  )
+y_s4_m <- as.matrix(y_s4[-1])
+```
+
+And repeat the preparation of the data for the code
+
+```{r}
+first_s3 <- apply(y_s3_m, 1, get.first)
+first_s4 <- apply(y_s4_m, 1, get.first)
+
+my.data.s3 <- list(y = y_s3_m + 1)
+my.data.s4 <- list(y = y_s4_m + 1)
+
+my.constants.s3 <- list(first = first_s3,
+                   Time = ncol(y_s3_m),
+                   Kites = nrow(y_s3_m))
+my.constants.s4 <- list(first = first_s4,
+                   Time = ncol(y_s4_m),
+                   Kites = nrow(y_s4_m))
+zinits.s3 <- y_s3_m # say states are observations, detections in A or B are taken as alive in same sites 
+zinits.s3[zinits.s3==0] <- sample(c(1,2), sum(zinits.s3==0), replace = TRUE) # non-detections become alive in site A or B
+initial.values.s3 <- function(){list(phiA = runif(1, 0, 1), 
+                                  phiB = runif(1, 0, 1), 
+                                  gammaAB = runif(1, 0, 1), 
+                                  gammaBA = runif(1, 0, 1), 
+                                  pA = runif(1, 0, 1), 
+                                  pB = runif(1, 0, 1), 
+                                  z = zinits.s3)}
+zinits.s4 <- y_s4_m # say states are observations, detections in A or B are taken as alive in same sites 
+zinits.s4[zinits.s4==0] <- sample(c(1,2), sum(zinits.s4==0), replace = TRUE) # non-detections become alive in site A or B
+initial.values.s4 <- function(){list(phiA = runif(1, 0, 1), 
+                                  phiB = runif(1, 0, 1), 
+                                  gammaAB = runif(1, 0, 1), 
+                                  gammaBA = runif(1, 0, 1), 
+                                  pA = runif(1, 0, 1), 
+                                  pB = runif(1, 0, 1), 
+                                  z = zinits.s4)}
+
+# same for the two stages:
+parameters.to.save.multisite <- c("phiA", "phiB","gammaAB", "gammaBA", "pA", "pB")
+n.iter <- 10000
+n.burnin <- 5000
+n.chains <- 2
+```
+
+The model in `nimble`:
+```{r eval=FALSE}
+# this chunk is eval=FALSE
+multisite <- nimbleCode({
+  # -------------------------------------------------
+  # Parameters:
+  # phiA: survival probability site A (south)
+  # phiB: survival probability site B (north)
+  # gammaAB: movement probability from site A to site B (move from south to north)
+  # gammaBA: movement probability from site B to site A (move from north to south)
+  # pA: recapture probability site A (south)
+  # pB: recapture probability site B (north)
+  # -------------------------------------------------
+  # States (z):
+  # 1 alive at A (south)
+  # 2 alive at B (north)
+  # 3 dead
+  # Observations (y):  
+  # 1 not seen
+  # 2 seen at A (south)
+  # 3 seen at B (north)
+  # -------------------------------------------------
+  
+  # priors
+  phiA ~ dunif(0, 1)
+  phiB ~ dunif(0, 1)
+  gammaAB ~ dunif(0, 1)
+  gammaBA ~ dunif(0, 1)
+  pA ~ dunif(0, 1)
+  pB ~ dunif(0, 1)
+
+  # probabilities of state z(t+1) given z(t)
+  gamma[1,1] <- phiA * (1 - gammaAB)
+  gamma[1,2] <- phiA * gammaAB
+  gamma[1,3] <- 1 - phiA
+  gamma[2,1] <- phiB * gammaBA
+  gamma[2,2] <- phiB * (1 - gammaBA)
+  gamma[2,3] <- 1 - phiB
+  gamma[3,1] <- 0
+  gamma[3,2] <- 0
+  gamma[3,3] <- 1
+  
+  # probabilities of y(t) given z(t)
+  omega[1,1] <- 1 - pA     # Pr(alive A t -> non-detected t)
+  omega[1,2] <- pA         # Pr(alive A t -> detected A t)
+  omega[1,3] <- 0          # Pr(alive A t -> detected B t)
+  omega[2,1] <- 1 - pB     # Pr(alive B t -> non-detected t)
+  omega[2,2] <- 0          # Pr(alive B t -> detected A t)
+  omega[2,3] <- pB         # Pr(alive B t -> detected B t)
+  omega[3,1] <- 1          # Pr(dead t -> non-detected t)
+  omega[3,2] <- 0          # Pr(dead t -> detected A t)
+  omega[3,3] <- 0          # Pr(dead t -> detected B t)
+  
+  # likelihood 
+  for (k in 1:Kites){
+    # latent state at first capture
+    z[k,first[k]] <- y[k,first[k]] - 1 # if seen at site A (y = 2), state is alive in A (y - 1 = z = 1) with prob = 1
+    for (t in (first[k]+1):Time){      # if seen at site B (y = 3), state is alive in A (y - 1 = z = 2) with prob = 1
+      # draw (t) given z(t-1)
+      z[k,t] ~ dcat(gamma[z[k,t-1],1:3])
+      # draw y(t) given z(t)
+      y[k,t] ~ dcat(omega[z[k,t],1:3])
+    }
+  }
+})
+```
+
+Run nimble (from 14:32 to 14:53)
+
+```{r eval = FALSE}
+# this chunk is eval=FALSE
+mcmc.multisite.s3 <- nimbleMCMC(code = multisite, 
+                             constants = my.constants.s3,
+                             data = my.data.s3,              
+                             inits = initial.values.s3(),
+                             monitors = parameters.to.save.multisite,
+                             niter = n.iter,
+                             nburnin = n.burnin, 
+                             nchains = n.chains, 
+                             WAIC = TRUE)
+saveRDS(mcmc.multisite.s3, "data/mcmc_multisite_s3_2006_2026.RDS")
+```
+
+```{r}
+mcmc.multisite.s3 <- readRDS("data/mcmc_multisite_s3_2006_2026.RDS")
+MCMCsummary(mcmc.multisite.s3$samples, round = 3)
+MCMCplot(mcmc.multisite.s3$samples, main = "Stage 3 (adults 2 to 12 years)")
+```
+
+Run nimble (from 14:56 to 15:00)
+```{r eval = FALSE}
+# this chunk is eval=FALSE
+mcmc.multisite.s4 <- nimbleMCMC(code = multisite, 
+                             constants = my.constants.s4,
+                             data = my.data.s4,              
+                             inits = initial.values.s4(),
+                             monitors = parameters.to.save.multisite,
+                             niter = n.iter,
+                             nburnin = n.burnin, 
+                             nchains = n.chains, 
+                             WAIC = TRUE)
+saveRDS(mcmc.multisite.s4, "data/mcmc_multisite_s4_2006_2026.RDS")
+```
+
+```{r}
+mcmc.multisite.s4 <- readRDS("data/mcmc_multisite_s4_2006_2026.RDS")
+MCMCsummary(mcmc.multisite.s4$samples, round = 3)
+MCMCplot(mcmc.multisite.s4$samples, main = "Stage 4 (old adults >12 years)")
+```
+
+Recall that 
+
+$$
+\mathbf{M}_s  = \begin{bmatrix} 
+      m_{1,1} = \phi_A (1 - \gamma_{AB}) & m_{1,2} = \phi_B \gamma_{BA} \\
+      m_{2,1} = \phi_A \gamma_{AB} & m_{2,2} = \phi_B (1 - \gamma_{BA})
+      \end{bmatrix}_s
+$$
+
+## Block diagonal matrix for movement projection
+
+$\mathbb{M}$ therefore is:
+
+$$
+\mathbb{M} = \begin{pmatrix}
+      \mathbf{M}_1 = \begin{bmatrix} 
+      0 & 0 \\
+      0 & 0
+      \end{bmatrix}_1 & 0 & 0 & 0 \\
+      0 & \mathbf{M}_2  = \begin{bmatrix} 
+      0 & 0 \\
+      0 & 0
+      \end{bmatrix}_2 & 0 & 0 \\
+      0 & 0 & \mathbf{M}_3  = \begin{bmatrix} 
+      0.641 & 0.070 \\
+      0.149 & 0.740
+      \end{bmatrix}_3 & 0 \\ 
+      0 & 0 & 0 & \mathbf{M}_4 = \begin{bmatrix} 
+      0.692 & 0.067 \\
+      0.048 & 0.613
+      \end{bmatrix}_4
+\end{pmatrix}
+$$
+
+which means that the block-diagonal matrix is
+
+```{r}
+M1 <- M2 <- matrix(
+  c(
+    1, 0,
+    0, 1
+  ),
+  nrow = 2,
+  ncol = 2,
+  byrow = TRUE
+)
+
+M3 <- matrix(
+  c(
+    0.641, 0.070,
+    0.149, 0.740
+  ),
+  nrow = 2,
+  ncol = 2,
+  byrow = TRUE
+)
+
+M4 <- matrix(
+  c(
+    0.692, 0.067,
+    0.048, 0.613
+  ),
+  nrow = 2,
+  ncol = 2,
+  byrow = TRUE
+)
+
+# and the block matrix is:
+M <- rbind(
+  cbind(M1, matrix(0, nrow = 2, ncol = 2), matrix(0, nrow = 2, ncol = 2), matrix(0, nrow = 2, ncol = 2)),
+  cbind(matrix(0, nrow = 2, ncol = 2), M2, matrix(0, nrow = 2, ncol = 2), matrix(0, nrow = 2, ncol = 2)),
+  cbind(matrix(0, nrow = 2, ncol = 2), matrix(0, nrow = 2, ncol = 2), M3, matrix(0, nrow = 2, ncol = 2)),
+  cbind(matrix(0, nrow = 2, ncol = 2), matrix(0, nrow = 2, ncol = 2), matrix(0, nrow = 2, ncol = 2), M4)
+)
+
+M
+```
+
+Now we have all the elements to make the projection matrix of the metapopulation $\mathbf{A}$
+
+## Projection matrix of the metapopulation
+
+Recall that $\mathbf{A} = \mathbf{P}^\top \mathbb{M} \mathbf{P} \mathbb{B}$. 
+
+```{r}
+A = t(P) %*% M %*% P %*% B
+A
+eigA <- eigen(A)
+
+lambda_metapop <- Re(eigA$values[which.max(Re(eigA$values))])
+lambda_metapop
+```
+
+Again, in the absence of dispersal, the northern population with higher fertility would have a higher growth rate ($\lambda_{\mathbf{B}_2} = 1.080$) than the southern population ($\lambda_{\mathbf{B}_1} = 0.893$). The growth rate of the metapopulation is $\lambda_{\mathbf{A}} = 0.916$. This identifies the decline with the demographic data.
+
+# Discussion on next steps
+
+With this, we as research team can decide the specific modifications to this approach, for the report and for manuscripts. Please, bring specific ideas.
+
+# Discarded code (complex models are tricky - KISS)
+
+I tried a more complex model, which seems logical for me, but it turned out to be awful in convergence. So, as someone told me a long time ago, for the models we want to do here "*KISS: Keep It Sweet and Simple*". 
+
 ## Unsuccessful  try of Breeding probability transition matrix
 We have the stages:
 
@@ -3067,9 +3463,6 @@ parameters.to.save.cjs.b <- c("phi1", "phi2", "phi3", "phi4",
 ```
 
 ```{r eval=FALSE}
-library(nimble)
-library(MCMCvis)
-
 simple_cjs_b <- nimbleCode({
   # -------------------------------------------------
   # Age classes:
@@ -3291,6 +3684,7 @@ n.chains <- 2
 
 from 13:12 to 13:42
 ```{r eval = FALSE}
+# this chunk is eval=FALSE
 mcmc.simple.cjs.br.s <- nimbleMCMC(code = simple_cjs_b, 
                              constants = my.constants.s,
                              data = my.data.s,              
